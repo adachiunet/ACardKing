@@ -140,7 +140,7 @@ enum ExportService {
     }
 
     private static func writeTempFile(content: String, filename: String) -> URL? {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(sanitizeFilename(filename))
         do {
             try content.write(to: url, atomically: true, encoding: .utf8)
             return url
@@ -148,5 +148,23 @@ enum ExportService {
             print("ExportService write error: \(error)")
             return nil
         }
+    }
+
+    /// "匯出這張名片" builds its filename from the card's own name (e.g. "\(card.name).vcf"),
+    /// and a name that came from merging front+back OCR (see OCRService.merge) can legitimately
+    /// contain a "/" — e.g. "陳大文 / David Chen" for a bilingual card. `appendingPathComponent`
+    /// treats "/" as a path separator, so that filename silently pointed at a subdirectory that
+    /// doesn't exist, the write failed, and the export button appeared to do nothing. This strips
+    /// every character that isn't valid in a filename on iOS/macOS, so the export can't be
+    /// silently broken by whatever text ended up in the name field.
+    private static func sanitizeFilename(_ filename: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        let cleaned = filename.components(separatedBy: invalidCharacters).joined(separator: "-")
+        let trimmed = cleaned.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            let ext = (filename as NSString).pathExtension
+            return ext.isEmpty ? "名片" : "名片.\(ext)"
+        }
+        return trimmed
     }
 }
