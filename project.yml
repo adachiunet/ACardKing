@@ -11,9 +11,13 @@ targets:
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - path: CardKing
+      - path: .
         excludes:
           - "Resources/**"
+          - "project.yml"
+          - "SETUP.md"
+          - "CI-SETUP.md"
+          - ".github/**"
     info:
       path: Generated-Info.plist
       properties:
