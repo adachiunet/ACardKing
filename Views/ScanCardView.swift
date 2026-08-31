@@ -9,6 +9,7 @@ struct ScanCardView: View {
         case scanningFront
         case scanningBack
         case processing
+        case mergeReview(frontFields: ParsedCardFields, backFields: ParsedCardFields, frontPath: String?, backPath: String?)
         case reviewing(ParsedCardFields, frontPath: String?, backPath: String?)
         case failed
     }
@@ -34,6 +35,10 @@ struct ScanCardView: View {
                 case .processing:
                     ProgressView("辨識文字中…")
                         .onAppear(perform: runOCR)
+                case .mergeReview(let frontFields, let backFields, let front, let back):
+                    FrontBackMergeReviewView(front: frontFields, back: backFields) { resolved in
+                        stage = .reviewing(resolved, frontPath: front, backPath: back)
+                    }
                 case .reviewing(let parsed, let front, let back):
                     CardFormView(
                         existingCard: nil,
@@ -90,9 +95,16 @@ struct ScanCardView: View {
 
             OCRService.recognizeText(in: backImage) { backLines in
                 let backParsed = OCRService.parse(lines: backLines)
-                let merged = OCRService.merge(front: frontParsed, back: backParsed)
                 DispatchQueue.main.async {
-                    stage = .reviewing(merged, frontPath: frontImagePath, backPath: backImagePath)
+                    if OCRService.divergentFields(front: frontParsed, back: backParsed) {
+                        stage = .mergeReview(
+                            frontFields: frontParsed, backFields: backParsed,
+                            frontPath: frontImagePath, backPath: backImagePath
+                        )
+                    } else {
+                        let merged = OCRService.merge(front: frontParsed, back: backParsed)
+                        stage = .reviewing(merged, frontPath: frontImagePath, backPath: backImagePath)
+                    }
                 }
             }
         }
