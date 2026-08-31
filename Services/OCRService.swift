@@ -39,6 +39,23 @@ enum OCRService {
         pattern: #"(?:分機|ext\.?|轉|转)[:：\s]*([0-9]{1,6})"#, options: [.caseInsensitive]
     )
 
+    /// Legal-entity suffixes that reliably mark a line as the company name, wherever it sits
+    /// on the card — a logo or a stacked layout means the company often ISN'T the third line
+    /// down the way plain top-to-bottom text order would suggest, so this is checked before
+    /// falling back to position.
+    private static let companyKeywords = [
+        "股份有限公司", "有限公司", "企業社", "工作室", "事務所", "商行", "集團",
+        "Co., Ltd", "Co.,Ltd", "Ltd.", "Inc.", "Corp.", "LLC", "Group"
+    ]
+
+    /// Address markers. Checked together with "the line has a digit in it" (see `parse`) so
+    /// a job title like "市場部經理" (which contains 市 but no house/floor number) doesn't get
+    /// misfiled as an address just because it shares a character with a real street name.
+    private static let addressKeywords = [
+        "路", "街", "道", "巷", "弄", "號", "樓", "室", "區", "市", "縣",
+        "Road", "Rd.", "Street", "St.", "Ave", "Avenue", "Floor", "District"
+    ]
+
     /// Runs on-device text recognition on the given image and returns the recognized lines,
     /// ordered top-to-bottom, left-to-right (a best-effort approximation of reading order).
     static func recognizeText(in image: UIImage, completion: @escaping ([String]) -> Void) {
@@ -142,11 +159,37 @@ enum OCRService {
             remainingLines.append(line)
         }
 
-        if remainingLines.count > 0 { result.name = remainingLines[0] }
-        if remainingLines.count > 1 { result.jobTitle = remainingLines[1] }
-        if remainingLines.count > 2 { result.company = remainingLines[2] }
-        if remainingLines.count > 3 {
-            result.address = remainingLines[3...].joined(separator: " ")
+        // Company and address are pulled out by keyword wherever they appear, BEFORE the
+        // positional guess below runs — a line with a company legal suffix or a street
+        // number is almost never mistaken for something else, whereas "the company name is
+        // always the 3rd line" breaks the moment a card leads with a logo, a slogan, or the
+        // company name in bigger type at the very top.
+        var positionalLines: [String] = []
+        var addressLines: [String] = []
+        for line in remainingLines {
+            if result.company.isEmpty, containsAny(line, companyKeywords) {
+                result.company = line
+                continue
+            }
+            if containsAny(line, addressKeywords), line.contains(where: \.isNumber) {
+                addressLines.append(line)
+                continue
+            }
+            positionalLines.append(line)
+        }
+
+        if positionalLines.count > 0 { result.name = positionalLines[0] }
+        if positionalLines.count > 1 { result.jobTitle = positionalLines[1] }
+        var nextIndex = 2
+        if result.company.isEmpty, positionalLines.count > 2 {
+            result.company = positionalLines[2]
+            nextIndex = 3
+        }
+        if positionalLines.count > nextIndex {
+            addressLines.append(contentsOf: positionalLines[nextIndex...])
+        }
+        if !addressLines.isEmpty {
+            result.address = addressLines.joined(separator: " ")
         }
         // 部門 (department) is deliberately NOT guessed here — line position alone can't
         // reliably tell a department line apart from a second job-title line or the company
@@ -154,6 +197,27 @@ enum OCRService {
         // scanning; the review screen lets the user type it in directly.
 
         return result
+    }
+
+    private static func containsAny(_ line: String, _ keywords: [String]) -> Bool {
+        keywords.contains { line.localizedCaseInsensitiveContains($0) }
+    }
+
+    /// True when front and back disagree on at least one of the fields `merge` would
+    /// otherwise silently join with " / " (most often a Chinese/English bilingual card).
+    /// The scan flow uses this to decide whether to show the user an explicit "combine
+    /// these?" screen instead of just merging without asking.
+    static func divergentFields(front: ParsedCardFields, back: ParsedCardFields) -> Bool {
+        func differs(_ a: String, _ b: String) -> Bool {
+            let a = a.trimmingCharacters(in: .whitespaces)
+            let b = b.trimmingCharacters(in: .whitespaces)
+            return !a.isEmpty && !b.isEmpty && a != b
+        }
+        return differs(front.name, back.name)
+            || differs(front.jobTitle, back.jobTitle)
+            || differs(front.company, back.company)
+            || differs(front.website, back.website)
+            || differs(front.address, back.address)
     }
 
     /// Merges the front and back photo's OCR guesses into the one set of fields that gets
@@ -165,7 +229,9 @@ enum OCRService {
     /// sides are combined and de-duplicated, and both sides' raw text is kept so the review
     /// screen can show exactly what was read from each side if needed. This is still only a
     /// starting guess — the review screen always lets the user trim or fix the combined text
-    /// before saving.
+    /// before saving. (The scan flow now only reaches this silently when `divergentFields`
+    /// is false; when fields actually disagree, `FrontBackMergeReviewView` asks first and
+    /// this just supplies its "both" default.)
     static func merge(front: ParsedCardFields, back: ParsedCardFields?) -> ParsedCardFields {
         guard let back else { return front }
 
