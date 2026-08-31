@@ -33,7 +33,7 @@ struct CardRow: View {
 
     @ViewBuilder
     private var avatar: some View {
-        if let path = card.frontImagePath, let image = ImageStorageService.load(path) {
+        if let path = card.frontImagePath, let image = ImageStorageService.loadThumbnail(path) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
