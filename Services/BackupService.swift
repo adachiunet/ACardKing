@@ -52,6 +52,12 @@ struct BackupCard: Codable {
     /// Added alongside BusinessCard.isMyCard. Defaults to false when decoding an older backup
     /// file that predates this field, so importing a pre-existing export never crashes.
     var isMyCard: Bool = false
+    /// Added alongside BusinessCard.isFavorite/followUpDate/interactions. All three default to
+    /// "unset" when decoding an older backup file that predates them, for the same reason as
+    /// isMyCard above — a pre-existing export must still import cleanly.
+    var isFavorite: Bool = false
+    var followUpDate: Date?
+    var interactions: [InteractionEntry] = []
 }
 
 enum BackupService {
@@ -77,7 +83,10 @@ enum BackupService {
                 dateModified: card.dateModified,
                 frontImagePath: card.frontImagePath,
                 backImagePath: card.backImagePath,
-                isMyCard: card.isMyCard
+                isMyCard: card.isMyCard,
+                isFavorite: card.isFavorite,
+                followUpDate: card.followUpDate,
+                interactions: card.interactions
             )
         }
         let payload = BackupPayload(exportedAt: .now, tags: backupTags, cards: backupCards)
@@ -145,12 +154,22 @@ enum BackupService {
                 notes: backupCard.notes,
                 frontImagePath: backupCard.frontImagePath,
                 backImagePath: backupCard.backImagePath,
-                isMyCard: backupCard.isMyCard
+                isMyCard: backupCard.isMyCard,
+                isFavorite: backupCard.isFavorite,
+                followUpDate: backupCard.followUpDate,
+                interactions: backupCard.interactions
             )
             card.dateAdded = backupCard.dateAdded
             card.dateModified = backupCard.dateModified
             card.tags = backupCard.tagNames.compactMap { tagLookup[$0] }
             modelContext.insert(card)
+            // Re-importing a backup that carried a pending 追蹤提醒 needs to also re-schedule
+            // the actual local notification — BusinessCard.followUpDate being set is not by
+            // itself enough, since the notification is a separate OS-level object keyed by
+            // card id that importing straight into the model context bypasses entirely.
+            if let followUpDate = card.followUpDate {
+                ReminderService.schedule(cardID: card.id, name: card.name, date: followUpDate)
+            }
         }
 
         // A re-imported backup could carry a card flagged "我的名片" on top of one already
