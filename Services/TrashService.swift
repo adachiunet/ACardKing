@@ -18,7 +18,7 @@ enum TrashService {
     static func purgeExpired(context: ModelContext) {
         guard let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: .now) else { return }
         let predicate = #Predicate<BusinessCard> { card in
-            card.isDeleted && (card.deletedAt ?? .distantFuture) < cutoff
+            card.isDeleted && (card.deletedAt ?? Date.distantFuture) < cutoff
         }
         guard let expired = try? context.fetch(FetchDescriptor<BusinessCard>(predicate: predicate)) else { return }
         for card in expired {
