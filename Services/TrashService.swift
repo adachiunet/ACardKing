@@ -17,8 +17,15 @@ enum TrashService {
     /// the trash screen) — with nothing to purge it's just one cheap, empty fetch.
     static func purgeExpired(context: ModelContext) {
         guard let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: .now) else { return }
+        // `Date.distantFuture` captured into a plain local constant first: the #Predicate macro
+        // trips over a static member access like `Date.distantFuture` written directly inside
+        // the predicate closure (confirmed via an actual Xcode build error — it tries to build a
+        // KeyPath expression tree for it and fails to match the closure's expected result type).
+        // A captured local `Date` value, by contrast, is exactly the kind of external reference
+        // #Predicate is built to support.
+        let distantFuture = Date.distantFuture
         let predicate = #Predicate<BusinessCard> { card in
-            card.isDeleted && (card.deletedAt ?? Date.distantFuture) < cutoff
+            card.isDeleted && (card.deletedAt ?? distantFuture) < cutoff
         }
         guard let expired = try? context.fetch(FetchDescriptor<BusinessCard>(predicate: predicate)) else { return }
         for card in expired {
