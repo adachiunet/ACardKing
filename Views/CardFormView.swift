@@ -195,7 +195,7 @@ struct CardFormView: View {
             }
 
             if !isMyCard {
-                Section("互動紀錄") {
+                Section {
                     ForEach(interactions.sorted(by: { $0.date > $1.date })) { entry in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.date, format: .dateTime.year().month().day().hour().minute())
@@ -214,6 +214,8 @@ struct CardFormView: View {
                         Button("新增") { addInteraction() }
                             .disabled(newInteractionText.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
+                } header: {
+                    Text("互動紀錄")
                 } footer: {
                     Text("每一筆都會記錄新增當下的時間,累積成跟這個人的往來紀錄,不會像備註一樣被覆蓋掉。")
                 }
