@@ -53,12 +53,35 @@ struct CardFormView: View {
     /// entered or already-saved cards, since only a fresh scan carries this.
     @State private var rawOCRText = ""
 
+    @State private var isFavorite = false
+    /// Whether the 追蹤提醒 toggle is on — kept separate from `followUpDate` so the DatePicker
+    /// has a concrete non-optional `Date` to bind to while still letting the field as a whole
+    /// be "unset" (this toggle off → `followUpDate` saved as nil, cancelling any reminder).
+    @State private var hasFollowUp = false
+    @State private var followUpDate = Date.now.addingTimeInterval(3 * 24 * 3600)
+    /// Set to true if the user turned 追蹤提醒 on but denied (or previously denied) the
+    /// notification permission — shown as an inline hint rather than silently saving a
+    /// reminder date that will never actually notify anyone.
+    @State private var notificationsDenied = false
+
+    @State private var interactions: [InteractionEntry] = []
+    @State private var newInteractionText = ""
+
     @State private var newTagName = ""
     @State private var showingNewTagField = false
     @State private var didLoadInitialState = false
 
+    // Drives the duplicate-warning sheet directly off the candidate itself (`.sheet(item:)`)
+    // rather than a separate `Bool` flag alongside it. The previous two-state version
+    // (`showingDuplicateWarning = true` + a separately-set `duplicateCandidate`, with the
+    // sheet's content closure doing `if let duplicateCandidate { ... }`) is a known SwiftUI
+    // footgun: if the sheet's content closure is ever evaluated a beat before the optional's
+    // new value has propagated, the `if let` fails and the sheet presents genuinely empty —
+    // a blank white sheet that never populates and never dismisses on its own, since nothing
+    // in it can be tapped. `.sheet(item:)` can't land in that state: SwiftUI only presents the
+    // sheet once the item is non-nil, and the closure receives that value directly, so there's
+    // no separate flag that can fall out of sync with it.
     @State private var duplicateCandidate: BusinessCard?
-    @State private var showingDuplicateWarning = false
 
     private var isEditing: Bool { existingCard != nil }
 
@@ -134,6 +157,34 @@ struct CardFormView: View {
                 Text("標記後可以在「我的名片」畫面用 QR Code 或分享面板分享出去。同一時間只會保留最新標記的一張,標記這張會自動取消其他張的標記。")
             }
 
+            if !isMyCard {
+                Section {
+                    Toggle("我的最愛", isOn: $isFavorite)
+                } footer: {
+                    Text("標記後會在名片清單優先顯示,也可以用「只看最愛」篩選。")
+                }
+
+                Section {
+                    Toggle("設定追蹤提醒", isOn: $hasFollowUp)
+                    if hasFollowUp {
+                        DatePicker("提醒時間", selection: $followUpDate)
+                        if notificationsDenied {
+                            Label("尚未允許通知,提醒時間到了不會跳出通知。可以到「設定」App 開啟本 App 的通知權限。", systemImage: "bell.slash")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                } footer: {
+                    Text("時間到了會用手機的本機通知提醒你,不需要網路,也不會有任何資料傳出這支手機。")
+                }
+                .onChange(of: hasFollowUp) { _, newValue in
+                    guard newValue else { return }
+                    ReminderService.requestAuthorizationIfNeeded { granted in
+                        notificationsDenied = !granted
+                    }
+                }
+            }
+
             Section("標籤") {
                 tagPicker
             }
@@ -141,6 +192,31 @@ struct CardFormView: View {
             Section("備註") {
                 TextEditor(text: $notes)
                     .frame(minHeight: 100)
+            }
+
+            if !isMyCard {
+                Section("互動紀錄") {
+                    ForEach(interactions.sorted(by: { $0.date > $1.date })) { entry in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.date, format: .dateTime.year().month().day().hour().minute())
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(entry.text)
+                        }
+                    }
+                    .onDelete { offsets in
+                        let sorted = interactions.sorted(by: { $0.date > $1.date })
+                        let idsToRemove = Set(offsets.map { sorted[$0].id })
+                        interactions.removeAll { idsToRemove.contains($0.id) }
+                    }
+                    HStack {
+                        TextField("例如:在展覽認識、聊了合作案…", text: $newInteractionText, axis: .vertical)
+                        Button("新增") { addInteraction() }
+                            .disabled(newInteractionText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                } footer: {
+                    Text("每一筆都會記錄新增當下的時間,累積成跟這個人的往來紀錄,不會像備註一樣被覆蓋掉。")
+                }
             }
 
             if frontImagePath != nil || backImagePath != nil {
@@ -180,23 +256,21 @@ struct CardFormView: View {
             }
         }
         .onAppear(perform: loadInitialStateIfNeeded)
-        .sheet(isPresented: $showingDuplicateWarning) {
-            if let duplicateCandidate {
-                DuplicateWarningView(
-                    existingCard: duplicateCandidate,
-                    onKeepBoth: {
-                        showingDuplicateWarning = false
-                        save()
-                    },
-                    onUpdateExisting: {
-                        showingDuplicateWarning = false
-                        updateExisting(duplicateCandidate)
-                    },
-                    onCancel: {
-                        showingDuplicateWarning = false
-                    }
-                )
-            }
+        .sheet(item: $duplicateCandidate) { duplicate in
+            DuplicateWarningView(
+                existingCard: duplicate,
+                onKeepBoth: {
+                    duplicateCandidate = nil
+                    save()
+                },
+                onUpdateExisting: {
+                    duplicateCandidate = nil
+                    updateExisting(duplicate)
+                },
+                onCancel: {
+                    duplicateCandidate = nil
+                }
+            )
         }
     }
 
@@ -223,6 +297,13 @@ struct CardFormView: View {
                 }
             }
         }
+    }
+
+    private func addInteraction() {
+        let trimmed = newInteractionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        interactions.append(InteractionEntry(text: trimmed))
+        newInteractionText = ""
     }
 
     private func addNewTag() {
@@ -254,6 +335,12 @@ struct CardFormView: View {
             frontImagePath = card.frontImagePath
             backImagePath = card.backImagePath
             isMyCard = card.isMyCard
+            isFavorite = card.isFavorite
+            interactions = card.interactions
+            if let existingFollowUp = card.followUpDate {
+                hasFollowUp = true
+                followUpDate = existingFollowUp
+            }
         } else if let parsed = prefilled {
             name = parsed.name
             jobTitle = parsed.jobTitle
@@ -309,7 +396,6 @@ struct CardFormView: View {
     private func attemptSave() {
         if !isEditing, !isMyCard, let duplicate = findDuplicate() {
             duplicateCandidate = duplicate
-            showingDuplicateWarning = true
         } else {
             save()
         }
@@ -356,8 +442,37 @@ struct CardFormView: View {
             modelContext.insert(card)
             targetCard = card
         }
+        // Either branch above IS the same card `interactions` was loaded from (the existing
+        // card being edited, or a brand-new one that had nothing to load) — a straight replace
+        // is correct here, unlike `updateExisting` below.
+        targetCard.interactions = interactions
+        applyExtras(to: targetCard)
         enforceSingleMyCard(keeping: targetCard)
         finish(with: targetCard)
+    }
+
+    /// Writes the newer, "extra" fields (最愛/追蹤提醒) onto the card and syncs the follow-up
+    /// reminder's local notification to match — shared by both `save()` and `updateExisting()`
+    /// so the two saving paths can't drift out of sync with each other. Does NOT touch
+    /// `interactions` — see the comment at each call site for why that one needs different
+    /// handling depending on whether `card` is the same card the form's `interactions` state
+    /// was loaded from. "我的名片" never carries any of these (following up with yourself makes
+    /// no sense), so they're forced off for it regardless of whatever the hidden form state holds.
+    private func applyExtras(to card: BusinessCard) {
+        if isMyCard {
+            card.isFavorite = false
+            card.followUpDate = nil
+            ReminderService.cancel(cardID: card.id)
+            return
+        }
+        card.isFavorite = isFavorite
+        if hasFollowUp {
+            card.followUpDate = followUpDate
+            ReminderService.schedule(cardID: card.id, name: card.name, date: followUpDate)
+        } else {
+            card.followUpDate = nil
+            ReminderService.cancel(cardID: card.id)
+        }
     }
 
     /// Applies the entered fields onto an EXISTING card (the duplicate the user chose to
@@ -380,6 +495,13 @@ struct CardFormView: View {
         if let backImagePath { card.backImagePath = backImagePath }
         card.isMyCard = isMyCard
         card.dateModified = .now
+        // `card` here is the OLD card the duplicate check matched against, not the one
+        // `interactions` was loaded from (this form started as a brand-new-card form, so its
+        // `interactions` only holds whatever the user typed in THIS session, if anything) —
+        // append rather than replace, the same "don't silently lose history" reasoning as the
+        // tag union just above, so the old card's interaction history is never overwritten.
+        card.interactions += interactions
+        applyExtras(to: card)
         enforceSingleMyCard(keeping: card)
         finish(with: card)
     }
