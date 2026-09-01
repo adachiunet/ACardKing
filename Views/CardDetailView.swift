@@ -10,10 +10,24 @@ struct CardDetailView: View {
 
     @State private var showingEdit = false
     @State private var exportFile: ExportFile?
+    @State private var newInteractionText = ""
 
     var body: some View {
         List {
             headerSection
+
+            if !card.isMyCard {
+                Section {
+                    if let followUpDate = card.followUpDate {
+                        LabeledContent("追蹤提醒", value: followUpDate.formatted(date: .abbreviated, time: .shortened))
+                        Button("取消提醒", role: .destructive) { cancelFollowUp() }
+                    } else {
+                        Text("還沒設定追蹤提醒,可以到「編輯」裡設定。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
 
             if !card.phones.isEmpty {
                 Section("電話") {
@@ -51,6 +65,24 @@ struct CardDetailView: View {
                     Text(card.notes)
                 }
             }
+            if !card.isMyCard {
+                Section("互動紀錄") {
+                    ForEach(card.interactions.sorted(by: { $0.date > $1.date })) { entry in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.date, format: .dateTime.year().month().day().hour().minute())
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(entry.text)
+                        }
+                    }
+                    .onDelete(perform: deleteInteractions)
+                    HStack {
+                        TextField("快速新增一筆紀錄…", text: $newInteractionText, axis: .vertical)
+                        Button("新增") { addInteraction() }
+                            .disabled(newInteractionText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+            }
             if card.frontImagePath != nil || card.backImagePath != nil {
                 Section("名片照片") {
                     HStack {
@@ -67,6 +99,16 @@ struct CardDetailView: View {
         .navigationTitle(card.name.isEmpty ? "名片" : card.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if !card.isMyCard {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        card.isFavorite.toggle()
+                    } label: {
+                        Image(systemName: card.isFavorite ? "star.fill" : "star")
+                            .foregroundStyle(card.isFavorite ? .yellow : .primary)
+                    }
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button {
@@ -141,10 +183,32 @@ struct CardDetailView: View {
         exportFile = ExportFile(items: items)
     }
 
+    /// Soft-deletes — the record (and its photos) stay on disk, just flagged and hidden from
+    /// the main list, so a mis-tap can be undone from 垃圾桶 (TrashView). `TrashService` is
+    /// what actually removes the photo files and the record for good, once it's been in the
+    /// trash long enough (or the user explicitly empties it there).
     private func deleteCard() {
-        ImageStorageService.delete(card.frontImagePath)
-        ImageStorageService.delete(card.backImagePath)
-        modelContext.delete(card)
+        card.isDeleted = true
+        card.deletedAt = .now
+        ReminderService.cancel(cardID: card.id)
         dismiss()
+    }
+
+    private func cancelFollowUp() {
+        card.followUpDate = nil
+        ReminderService.cancel(cardID: card.id)
+    }
+
+    private func addInteraction() {
+        let trimmed = newInteractionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        card.interactions.append(InteractionEntry(text: trimmed))
+        newInteractionText = ""
+    }
+
+    private func deleteInteractions(at offsets: IndexSet) {
+        let sorted = card.interactions.sorted(by: { $0.date > $1.date })
+        let idsToRemove = Set(offsets.map { sorted[$0].id })
+        card.interactions.removeAll { idsToRemove.contains($0.id) }
     }
 }
