@@ -34,6 +34,30 @@ final class BusinessCard {
     /// MyCardView reads it to show the "我的名片" screen (photo + QR code + share sheet).
     var isMyCard: Bool = false
 
+    /// 我的最愛 — a quick "I care about staying in touch with this person" flag, independent
+    /// of tags. Surfaced as a star toggle in CardDetailView/CardRow and as a "只看最愛" filter
+    /// in CardListView.
+    var isFavorite: Bool = false
+
+    /// 追蹤提醒 — an optional date the user wants to be reminded to follow up with this person.
+    /// `ReminderService` schedules/cancels a local notification (never a server push — nothing
+    /// about this ever leaves the device) keyed to `id`, so this field is the single source of
+    /// truth: setting it (re)schedules the notification, clearing it cancels it.
+    var followUpDate: Date?
+
+    /// 互動紀錄 — a growing, timestamped log ("met at the expo", "discussed the contract"),
+    /// as opposed to `notes` which stays a single free-text field for anything that isn't
+    /// naturally a dated entry. Same "array of Codable struct" storage pattern as `phones`/
+    /// `emails`. Newest-first ordering is a presentation concern, not enforced here.
+    var interactions: [InteractionEntry] = []
+
+    /// Soft-delete flag. Deleting a card in the UI no longer removes it from the store
+    /// immediately — it's flagged here (and `deletedAt` stamped) so it can be restored from
+    /// the 垃圾桶 (TrashView) screen. `CardListView`'s `@Query` filters these out of the main
+    /// list; `TrashService` permanently removes anything past its retention window.
+    var isDeleted: Bool = false
+    var deletedAt: Date?
+
     @Relationship(inverse: \Tag.cards)
     var tags: [Tag] = []
 
@@ -50,7 +74,10 @@ final class BusinessCard {
         notes: String = "",
         frontImagePath: String? = nil,
         backImagePath: String? = nil,
-        isMyCard: Bool = false
+        isMyCard: Bool = false,
+        isFavorite: Bool = false,
+        followUpDate: Date? = nil,
+        interactions: [InteractionEntry] = []
     ) {
         self.id = UUID()
         self.name = name
@@ -66,6 +93,11 @@ final class BusinessCard {
         self.frontImagePath = frontImagePath
         self.backImagePath = backImagePath
         self.isMyCard = isMyCard
+        self.isFavorite = isFavorite
+        self.followUpDate = followUpDate
+        self.interactions = interactions
+        self.isDeleted = false
+        self.deletedAt = nil
         self.dateAdded = .now
         self.dateModified = .now
     }
