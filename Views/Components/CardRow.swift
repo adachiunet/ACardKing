@@ -10,8 +10,15 @@ struct CardRow: View {
         HStack(spacing: 12) {
             avatar
             VStack(alignment: .leading, spacing: 4) {
-                Text(card.name.isEmpty ? "未命名" : card.name)
-                    .font(.headline)
+                HStack(spacing: 4) {
+                    Text(card.name.isEmpty ? "未命名" : card.name)
+                        .font(.headline)
+                    if card.isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                    }
+                }
                 let subtitle = [card.jobTitle, card.department, card.company]
                     .filter { !$0.isEmpty }.joined(separator: " · ")
                 if !subtitle.isEmpty {
