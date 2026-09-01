@@ -21,6 +21,15 @@ struct CardKingApp: App {
     var body: some Scene {
         WindowGroup {
             CardListView()
+                .task {
+                    // A quiet, no-UI sweep of anything left in 垃圾桶 past its retention
+                    // window — same cleanup TrashView does in its own .onAppear, run here
+                    // too so cards don't linger forever if the user never happens to open
+                    // that screen. Deliberately does NOT touch notification permissions —
+                    // that's requested lazily, only when the user turns on a follow-up
+                    // reminder for a specific card (see CardFormView), not at launch.
+                    TrashService.purgeExpired(context: sharedModelContainer.mainContext)
+                }
         }
         .modelContainer(sharedModelContainer)
     }
