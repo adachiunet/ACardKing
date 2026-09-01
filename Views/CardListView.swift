@@ -2,41 +2,92 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
-/// The app's home screen: search, tag-filter, and the full list of cards, plus every
+/// Persisted sort choices for the home list. Raw values are stored directly in `@AppStorage`
+/// (as a String), so renaming a case's raw value would silently reset users' saved preference —
+/// keep these stable once shipped.
+enum CardSortOption: String, CaseIterable, Identifiable {
+    case name, dateAddedDesc, dateModifiedDesc, company
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .name: return "姓名"
+        case .dateAddedDesc: return "新增時間(新到舊)"
+        case .dateModifiedDesc: return "修改時間(新到舊)"
+        case .company: return "公司"
+        }
+    }
+}
+
+/// The app's home screen: search、tag-filter, and the full list of cards, plus every
 /// entry point for adding cards (manual, single scan, batch camera scan, batch photo-library
 /// import) and for the app's data-portability features (vCard/CSV export, full backup
 /// export/import).
 struct CardListView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \BusinessCard.name) private var allCards: [BusinessCard]
+    // Excludes soft-deleted cards (see BusinessCard.isDeleted / TrashView) — a card the user
+    // deleted should disappear from the home list immediately even though the record itself
+    // is kept around for the trash's 30-day undo window. Sort is applied afterward in
+    // `filteredCards` (below) since the chosen CardSortOption can change at runtime while a
+    // static `@Query` sort descriptor can't easily follow an @AppStorage value.
+    @Query(filter: #Predicate<BusinessCard> { !$0.isDeleted }, sort: \BusinessCard.name)
+    private var allCards: [BusinessCard]
     @Query(sort: \Tag.name) private var allTags: [Tag]
 
     @State private var searchText = ""
     @State private var selectedTags: Set<Tag> = []
+    @State private var favoritesOnly = false
+    @AppStorage("cardSortOption") private var sortOption: CardSortOption = .name
 
     @State private var showingManualForm = false
     @State private var showingScan = false
     @State private var showingBatchScan = false
     @State private var showingBatchPhotoImport = false
+    @State private var showingQRScan = false
     @State private var showingTagManager = false
     @State private var showingImporter = false
     @State private var showingMyCard = false
+    @State private var showingTrash = false
+    @State private var showingStats = false
 
     @State private var exportFile: ExportFile?
     @State private var importResultMessage = ""
     @State private var showingImportResult = false
 
     private var filteredCards: [BusinessCard] {
-        allCards.filter { card in
+        // `localizedStandardContains` is Apple's "search-as-you-type" comparison — it's built
+        // for Spotlight-style matching, which for CJK text (no spaces to mark word boundaries)
+        // effectively requires the query to be a PREFIX of the whole string, not a substring
+        // found anywhere inside it. That's why searching "黃" against a name like "陳大文
+        // (黃小明介紹)" — or really any hit that isn't at position 0 — was returning nothing.
+        // `range(of:options:)` below is a plain, unambiguous "does this substring appear
+        // anywhere" search (still case- and diacritic-insensitive), which is what a "narrows
+        // as you type more characters" search box actually needs.
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matched = allCards.filter { card in
             let matchesTags = selectedTags.isEmpty || !Set(card.tags).isDisjoint(with: selectedTags)
             guard matchesTags else { return false }
-            guard !searchText.isEmpty else { return true }
+            guard !favoritesOnly || card.isFavorite else { return false }
+            guard !query.isEmpty else { return true }
 
             let haystacks = [card.name, card.company, card.jobTitle, card.department, card.taxId, card.notes]
                 + card.phones.map { $0.value }
                 + card.emails.map { $0.value }
                 + card.tags.map { $0.name }
-            return haystacks.contains { $0.localizedStandardContains(searchText) }
+            return haystacks.contains {
+                $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+        }
+        switch sortOption {
+        case .name:
+            return matched.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        case .dateAddedDesc:
+            return matched.sorted { $0.dateAdded > $1.dateAdded }
+        case .dateModifiedDesc:
+            return matched.sorted { $0.dateModified > $1.dateModified }
+        case .company:
+            return matched.sorted { $0.company.localizedStandardCompare($1.company) == .orderedAscending }
         }
     }
 
@@ -47,6 +98,7 @@ struct CardListView: View {
                     TagChipsRow(tags: allTags, selectedTags: $selectedTags)
                         .padding(.horizontal)
                 }
+                filterBar
                 content
             }
             .navigationTitle("AcardKing")
@@ -69,11 +121,20 @@ struct CardListView: View {
             .sheet(isPresented: $showingBatchPhotoImport) {
                 BatchScanView(source: .photoLibrary)
             }
+            .sheet(isPresented: $showingQRScan) {
+                ScanQRCardView()
+            }
             .sheet(isPresented: $showingTagManager) {
                 NavigationStack { TagManagerView() }
             }
             .sheet(isPresented: $showingMyCard) {
                 MyCardView()
+            }
+            .sheet(isPresented: $showingTrash) {
+                NavigationStack { TrashView() }
+            }
+            .sheet(isPresented: $showingStats) {
+                NavigationStack { StatsView() }
             }
             .sheet(item: $exportFile) { file in
                 ShareSheet(items: file.items)
@@ -85,6 +146,33 @@ struct CardListView: View {
                 Button("好") {}
             }
         }
+    }
+
+    /// "只看最愛" toggle + sort picker, sitting right above the list. Kept as a lightweight
+    /// row rather than folded into the tag-chips row above, since tags/favorites/sort are
+    /// conceptually three independent filters, not variations of one control.
+    private var filterBar: some View {
+        HStack {
+            Button {
+                favoritesOnly.toggle()
+            } label: {
+                Label("只看最愛", systemImage: favoritesOnly ? "star.fill" : "star")
+                    .font(.footnote)
+                    .foregroundStyle(favoritesOnly ? .yellow : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Picker("排序", selection: $sortOption) {
+                ForEach(CardSortOption.allCases) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+            .font(.footnote)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -144,6 +232,11 @@ struct CardListView: View {
                     Label("批次選圖建立", systemImage: "photo.stack")
                 }
                 Button {
+                    showingQRScan = true
+                } label: {
+                    Label("掃描 QR 名片", systemImage: "qrcode.viewfinder")
+                }
+                Button {
                     showingManualForm = true
                 } label: {
                     Label("手動輸入", systemImage: "square.and.pencil")
@@ -158,6 +251,17 @@ struct CardListView: View {
                     showingMyCard = true
                 } label: {
                     Label("我的名片", systemImage: "person.crop.rectangle")
+                }
+                Divider()
+                Button {
+                    showingStats = true
+                } label: {
+                    Label("名片統計", systemImage: "chart.bar")
+                }
+                Button {
+                    showingTrash = true
+                } label: {
+                    Label("垃圾桶", systemImage: "trash")
                 }
                 Divider()
                 Button {
@@ -193,12 +297,15 @@ struct CardListView: View {
         }
     }
 
+    /// Swipe-to-delete from the list uses the same soft-delete as CardDetailView's delete —
+    /// the card moves to 垃圾桶 (TrashView) instead of being removed immediately, so a swipe
+    /// that goes a little too far can still be undone.
     private func deleteCards(at offsets: IndexSet) {
         for index in offsets {
             let card = filteredCards[index]
-            ImageStorageService.delete(card.frontImagePath)
-            ImageStorageService.delete(card.backImagePath)
-            modelContext.delete(card)
+            card.isDeleted = true
+            card.deletedAt = .now
+            ReminderService.cancel(cardID: card.id)
         }
     }
 
