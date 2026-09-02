@@ -26,6 +26,16 @@ final class BusinessCard {
     /// a manually-entered card may have no scanned photo at all.
     var frontImagePath: String?
     var backImagePath: String?
+    /// Older front/back photos that got bumped when a newer scan replaced them during a
+    /// duplicate-card merge (see `CardFormView.updateExisting()`) — never populated any other
+    /// way. `frontImagePath`/`backImagePath` above always stay "the current photo for that
+    /// side" (what the thumbnail, vCard export, etc. use), so nothing else in the app needs to
+    /// know these exist; `CardDetailView` shows them in a collapsed "更早的照片" strip so they
+    /// aren't just silently kept out of sight. Added instead of turning the two paths above
+    /// into arrays specifically to avoid a SwiftData schema-type change on a field real
+    /// installs already have data in — purely additive fields default safely for old records.
+    var additionalFrontImagePaths: [String] = []
+    var additionalBackImagePaths: [String] = []
     var dateAdded: Date = Date.now
     var dateModified: Date = Date.now
     /// Marks this card as the user's OWN business card, as opposed to someone else's — set
@@ -74,6 +84,8 @@ final class BusinessCard {
         notes: String = "",
         frontImagePath: String? = nil,
         backImagePath: String? = nil,
+        additionalFrontImagePaths: [String] = [],
+        additionalBackImagePaths: [String] = [],
         isMyCard: Bool = false,
         isFavorite: Bool = false,
         followUpDate: Date? = nil,
@@ -92,6 +104,8 @@ final class BusinessCard {
         self.notes = notes
         self.frontImagePath = frontImagePath
         self.backImagePath = backImagePath
+        self.additionalFrontImagePaths = additionalFrontImagePaths
+        self.additionalBackImagePaths = additionalBackImagePaths
         self.isMyCard = isMyCard
         self.isFavorite = isFavorite
         self.followUpDate = followUpDate
