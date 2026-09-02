@@ -49,6 +49,12 @@ struct BackupCard: Codable {
     var dateModified: Date
     var frontImagePath: String?
     var backImagePath: String?
+    /// Added alongside BusinessCard.additionalFrontImagePaths/additionalBackImagePaths — older
+    /// photos a duplicate-card merge bumped out of the current front/back slot (see
+    /// `CardFormView.updateExisting()`). Defaults to empty for a pre-existing backup file that
+    /// predates this, same reasoning as isMyCard/isFavorite below.
+    var additionalFrontImagePaths: [String] = []
+    var additionalBackImagePaths: [String] = []
     /// Added alongside BusinessCard.isMyCard. Defaults to false when decoding an older backup
     /// file that predates this field, so importing a pre-existing export never crashes.
     var isMyCard: Bool = false
@@ -83,6 +89,8 @@ enum BackupService {
                 dateModified: card.dateModified,
                 frontImagePath: card.frontImagePath,
                 backImagePath: card.backImagePath,
+                additionalFrontImagePaths: card.additionalFrontImagePaths,
+                additionalBackImagePaths: card.additionalBackImagePaths,
                 isMyCard: card.isMyCard,
                 isFavorite: card.isFavorite,
                 followUpDate: card.followUpDate,
@@ -154,6 +162,8 @@ enum BackupService {
                 notes: backupCard.notes,
                 frontImagePath: backupCard.frontImagePath,
                 backImagePath: backupCard.backImagePath,
+                additionalFrontImagePaths: backupCard.additionalFrontImagePaths,
+                additionalBackImagePaths: backupCard.additionalBackImagePaths,
                 isMyCard: backupCard.isMyCard,
                 isFavorite: backupCard.isFavorite,
                 followUpDate: backupCard.followUpDate,
