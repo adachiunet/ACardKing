@@ -36,10 +36,15 @@ enum TrashService {
     /// Removes one card for good, right now — used both by the automatic purge above and by
     /// TrashView's explicit "永久刪除" button. Cleans up the card's photo files and cancels any
     /// pending 追蹤提醒 notification before deleting the SwiftData record itself, so nothing is
-    /// left dangling on disk or in the notification center.
+    /// left dangling on disk or in the notification center. Includes the older photos kept in
+    /// `additionalFrontImagePaths`/`additionalBackImagePaths` (see `BusinessCard`) — a card
+    /// that went through one or more duplicate-merges can carry more than just its current
+    /// front/back photo, and all of them are this card's files, not just the current pair.
     static func permanentlyDelete(_ card: BusinessCard, context: ModelContext) {
         ImageStorageService.delete(card.frontImagePath)
         ImageStorageService.delete(card.backImagePath)
+        for path in card.additionalFrontImagePaths { ImageStorageService.delete(path) }
+        for path in card.additionalBackImagePaths { ImageStorageService.delete(path) }
         ReminderService.cancel(cardID: card.id)
         context.delete(card)
     }
