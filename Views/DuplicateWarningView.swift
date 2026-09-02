@@ -53,7 +53,7 @@ struct DuplicateWarningView: View {
                     Button {
                         onUpdateExisting()
                     } label: {
-                        Label("更新舊名片(用剛剛輸入的資料覆蓋)", systemImage: "arrow.triangle.2.circlepath")
+                        Label("更新舊名片(合併新舊資料)", systemImage: "arrow.triangle.2.circlepath")
                     }
                     Button {
                         onKeepBoth()
@@ -61,7 +61,7 @@ struct DuplicateWarningView: View {
                         Label("仍然新增為另一張名片", systemImage: "plus.rectangle.on.rectangle")
                     }
                 } footer: {
-                    Text("「更新舊名片」會保留舊名片原有的標籤,並加上這次新選的標籤;電話、Email 等欄位則會換成剛剛輸入的內容。")
+                    Text("「更新舊名片」不會覆蓋掉舊資料:姓名、公司等欄位如果新舊不同,會用「/」合併保留兩者(地址用「；」);電話、Email 會兩邊都留著並自動去除重複;標籤是聯集。如果這次掃到新的照片,舊照片會保留在「更早的照片」,不會被取代或刪除。備註仍然是用這次輸入的內容取代。")
                 }
 
                 Section {
