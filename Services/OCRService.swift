@@ -43,9 +43,24 @@ enum OCRService {
     /// on the card — a logo or a stacked layout means the company often ISN'T the third line
     /// down the way plain top-to-bottom text order would suggest, so this is checked before
     /// falling back to position.
+    ///
+    /// The bare "公司" (not just the fuller "有限公司"/"股份有限公司") is deliberately included:
+    /// the user pointed out that a lot of real company names on cards just end in "XX公司"
+    /// without the full legal "股份有限公司"/"有限公司" suffix actually appearing on that line
+    /// (e.g. wrapped onto a second line, or the card just prints the short form) — the previous
+    /// list only matched the fuller forms, so a bare "XX科技公司" line fell through to the
+    /// positional guess and got mistaken for a person's name whenever it was the first line.
+    /// "公司" alone is a safe, high-precision signal for Chinese business cards: it's very rare
+    /// for that word to show up in a name/title/address line, so widening to it shouldn't
+    /// introduce new misfires. Also broadened with more of the common Taiwan business-entity
+    /// words and international suffixes that don't include "公司"/"Ltd"/"Inc" at all.
     private static let companyKeywords = [
-        "股份有限公司", "有限公司", "企業社", "工作室", "事務所", "商行", "集團",
-        "Co., Ltd", "Co.,Ltd", "Ltd.", "Inc.", "Corp.", "LLC", "Group"
+        "公司", "企業", "實業", "工業", "科技", "資訊", "生技", "生醫", "醫療", "貿易",
+        "國際", "集團", "控股", "投資", "顧問", "設計", "建設", "開發", "文創", "傳媒",
+        "企業社", "工作室", "事務所", "商行", "行號",
+        "Co., Ltd", "Co.,Ltd", "Ltd.", "Inc.", "Corp.", "LLC", "LLP", "Group",
+        "Technology", "Technologies", "Solutions", "Systems", "Enterprises",
+        "International", "Industries", "Holdings", "Consulting", "Studio"
     ]
 
     /// Address markers. Checked together with "the line has a digit in it" (see `parse`) so
@@ -114,7 +129,10 @@ enum OCRService {
             if let regex = emailRegex,
                let match = regex.firstMatch(in: line, range: range),
                let matchRange = Range(match.range, in: line) {
-                result.emails.append(ContactField(type: .other, value: String(line[matchRange])))
+                // Default to 公司 (work) rather than 其他 (other) — a scanned card's email is
+                // a company address in the overwhelming majority of cases, and the field is
+                // always editable afterward if this one happens to be personal.
+                result.emails.append(ContactField(type: .work, value: String(line[matchRange])))
                 continue
             }
 
@@ -151,7 +169,11 @@ enum OCRService {
                        let extGroupRange = Range(extMatch.range(at: 1), in: line) {
                         ext = String(line[extGroupRange])
                     }
-                    result.phones.append(ContactField(type: .other, value: candidate, ext: ext))
+                    // 10 digits is a Taiwan mobile number (09xx-xxx-xxx); anything else scanned
+                    // off a business card (a landline with area code, a toll-free line) defaults
+                    // to 公司 (work) rather than 其他 (other) — both are still editable afterward.
+                    let phoneType: ContactField.FieldType = digitCount == 10 ? .mobile : .work
+                    result.phones.append(ContactField(type: phoneType, value: candidate, ext: ext))
                     continue
                 }
             }
@@ -252,8 +274,11 @@ enum OCRService {
 
     /// Joins two guesses for the same field: empty ones drop out, identical ones collapse to
     /// one, and two different non-empty values (e.g. a Chinese name and its English
-    /// translation) are kept side by side.
-    private static func combine(_ a: String, _ b: String, separator: String = " / ") -> String {
+    /// translation) are kept side by side. Not `private` — `CardFormView.updateExisting()`
+    /// reuses this same convention when merging a duplicate-card update into an existing
+    /// record, so the two merge features (front/back OCR, duplicate-card update) read and
+    /// behave the same way instead of drifting into two different conventions.
+    static func combine(_ a: String, _ b: String, separator: String = " / ") -> String {
         let a = a.trimmingCharacters(in: .whitespaces)
         let b = b.trimmingCharacters(in: .whitespaces)
         if a.isEmpty { return b }
@@ -261,7 +286,27 @@ enum OCRService {
         return "\(a)\(separator)\(b)"
     }
 
-    private static func dedupContactFields(_ fields: [ContactField]) -> [ContactField] {
+    /// Same idea as `combine`, but for joining a freshly-entered value onto a field that may
+    /// already be the product of one or more *previous* merges — used by
+    /// `CardFormView.updateExisting()` when the same real-world contact gets re-scanned or
+    /// re-entered multiple times over the life of the card. Plain `combine` would happily keep
+    /// growing "黃 / huang" into "黃 / huang / huang / HUANG" every time the same variant shows
+    /// up again; this guards against that by skipping the append when `existing` already
+    /// contains `new` (case-insensitive), so a repeat sighting of a variant already on record
+    /// is a no-op instead of another copy tacked on.
+    static func combineIntoExisting(_ existing: String, _ new: String, separator: String = " / ") -> String {
+        let existing = existing.trimmingCharacters(in: .whitespaces)
+        let new = new.trimmingCharacters(in: .whitespaces)
+        if new.isEmpty { return existing }
+        if existing.isEmpty { return new }
+        if existing == new || existing.localizedCaseInsensitiveContains(new) { return existing }
+        return "\(existing)\(separator)\(new)"
+    }
+
+    /// Not `private` for the same reason as `combine` above — `CardFormView.updateExisting()`
+    /// reuses this to merge an existing card's phones/emails with a newly-entered set instead
+    /// of overwriting them outright.
+    static func dedupContactFields(_ fields: [ContactField]) -> [ContactField] {
         var seenValues = Set<String>()
         var result: [ContactField] = []
         for field in fields {
