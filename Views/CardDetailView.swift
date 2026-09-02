@@ -95,6 +95,32 @@ struct CardDetailView: View {
                     }
                 }
             }
+
+            // Older front/back photos that a duplicate-card merge bumped out of the current
+            // slot above (see BusinessCard.additionalFrontImagePaths/additionalBackImagePaths,
+            // CardFormView.updateExisting()) — collapsed by default since most cards never
+            // accumulate any, but never deleted, so they need to be reachable somewhere.
+            let olderPhotoPaths = card.additionalFrontImagePaths + card.additionalBackImagePaths
+            if !olderPhotoPaths.isEmpty {
+                Section {
+                    DisclosureGroup("更早的照片(\(olderPhotoPaths.count))") {
+                        ScrollView(.horizontal) {
+                            HStack {
+                                ForEach(olderPhotoPaths, id: \.self) { path in
+                                    if let img = ImageStorageService.load(path) {
+                                        Image(uiImage: img)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(height: 100)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("重複更新這張名片、又掃到不同的照片時,舊照片會留在這裡,不會被刪除。")
+                }
+            }
         }
         .navigationTitle(card.name.isEmpty ? "名片" : card.name)
         .navigationBarTitleDisplayMode(.inline)
