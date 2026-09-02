@@ -478,34 +478,93 @@ struct CardFormView: View {
     }
 
     /// Applies the entered fields onto an EXISTING card (the duplicate the user chose to
-    /// update) instead of creating a new one. Old tags are kept and merged with any newly
-    /// selected ones — a duplicate hit means "same person", so the old tags (e.g. "客戶") are
-    /// still true and shouldn't quietly disappear just because this pass didn't re-pick them.
+    /// update) instead of creating a new one. This never overwrites the old record with the
+    /// new one — every field is combined, MECE-style, so nothing already on file can be lost
+    /// just because this pass didn't happen to re-capture it:
+    ///  - Short text fields (name/jobTitle/department/company/website/taxId) keep both
+    ///    versions side by side with "/" when they differ (same convention as the front/back
+    ///    OCR merge — e.g. a Chinese name and a later-scanned romanized one become "黃 / huang"),
+    ///    and skip re-appending a variant that's already present so repeated re-scans of the
+    ///    same person don't grow the field forever.
+    ///  - Address does the same but with "；", matching the front/back merge's own convention.
+    ///  - Phones/emails are unioned and de-duplicated (by the same normalization
+    ///    `findDuplicate()` uses to detect them as the same number/address in the first place),
+    ///    not replaced — an old number missing from this pass stays on the card.
+    ///  - Tags are unioned (old tags like "客戶" stay true even if this pass didn't re-pick them).
+    ///  - Photos: the newly-scanned photo becomes the current one (what the thumbnail/vCard
+    ///    export use), but the photo it replaces is kept, not deleted — see
+    ///    `BusinessCard.additionalFrontImagePaths`/`additionalBackImagePaths`.
+    ///  - Notes stays a straight overwrite — unlike the other fields it's free-form prose, not
+    ///    a set of discrete facts, so there's no well-defined way to "union" two paragraphs.
     private func updateExisting(_ card: BusinessCard) {
-        card.name = name
-        card.jobTitle = jobTitle
-        card.department = department
-        card.company = company
-        card.phones = phones
-        card.emails = emails
-        card.website = website
-        card.address = address
-        card.taxId = taxId
+        card.name = OCRService.combineIntoExisting(card.name, name)
+        card.jobTitle = OCRService.combineIntoExisting(card.jobTitle, jobTitle)
+        card.department = OCRService.combineIntoExisting(card.department, department)
+        card.company = OCRService.combineIntoExisting(card.company, company)
+        card.website = OCRService.combineIntoExisting(card.website, website)
+        card.address = OCRService.combineIntoExisting(card.address, address, separator: "；")
+        card.taxId = OCRService.combineIntoExisting(card.taxId, taxId)
         card.notes = notes
+        card.phones = mergedContactFields(existing: card.phones, new: phones, key: normalizedDigits)
+        card.emails = mergedContactFields(existing: card.emails, new: emails, key: normalizedEmail)
         card.tags = Array(Set(card.tags).union(selectedTags))
-        if let frontImagePath { card.frontImagePath = frontImagePath }
-        if let backImagePath { card.backImagePath = backImagePath }
+        let front = mergedPhoto(existingPrimary: card.frontImagePath, existingOlder: card.additionalFrontImagePaths, newPath: frontImagePath)
+        card.frontImagePath = front.primary
+        card.additionalFrontImagePaths = front.older
+        let back = mergedPhoto(existingPrimary: card.backImagePath, existingOlder: card.additionalBackImagePaths, newPath: backImagePath)
+        card.backImagePath = back.primary
+        card.additionalBackImagePaths = back.older
         card.isMyCard = isMyCard
         card.dateModified = .now
         // `card` here is the OLD card the duplicate check matched against, not the one
         // `interactions` was loaded from (this form started as a brand-new-card form, so its
         // `interactions` only holds whatever the user typed in THIS session, if anything) —
-        // append rather than replace, the same "don't silently lose history" reasoning as the
-        // tag union just above, so the old card's interaction history is never overwritten.
+        // append rather than replace, the same "don't silently lose history" reasoning as
+        // everything else in this function, so the old card's interaction history is never
+        // overwritten.
         card.interactions += interactions
         applyExtras(to: card)
         enforceSingleMyCard(keeping: card)
         finish(with: card)
+    }
+
+    /// Unions an existing card's phones/emails with the newly-entered set, de-duplicating by
+    /// whatever normalized `key` the caller passes (digits-only for phones, trimmed+lowercased
+    /// for emails — the same normalization `findDuplicate()` uses, so two formattings of the
+    /// same number/address collapse into one entry instead of surviving as two).
+    private func mergedContactFields(
+        existing: [ContactField],
+        new: [ContactField],
+        key: (ContactField) -> String
+    ) -> [ContactField] {
+        var seen = Set<String>()
+        var result: [ContactField] = []
+        for field in existing + new {
+            let normalized = key(field)
+            guard !normalized.isEmpty, !seen.contains(normalized) else { continue }
+            seen.insert(normalized)
+            result.append(field)
+        }
+        return result
+    }
+
+    /// Folds a newly-scanned photo into an existing card's photo history for one side
+    /// (front or back): the new photo becomes the current one; if it's actually different
+    /// from what was there, the old one is kept in `older` (deduplicated by filename) rather
+    /// than deleted, so re-scanning someone's card never loses the photo that was on file
+    /// before. Returns the existing state unchanged when no new photo was captured this pass.
+    private func mergedPhoto(
+        existingPrimary: String?,
+        existingOlder: [String],
+        newPath: String?
+    ) -> (primary: String?, older: [String]) {
+        guard let newPath else { return (existingPrimary, existingOlder) }
+        guard let existingPrimary, existingPrimary != newPath else { return (newPath, existingOlder) }
+        var older = existingOlder
+        if !older.contains(existingPrimary) {
+            older.append(existingPrimary)
+        }
+        return (newPath, older)
     }
 
     private func enforceSingleMyCard(keeping targetCard: BusinessCard) {
