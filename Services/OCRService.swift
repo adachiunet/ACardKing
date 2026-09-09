@@ -21,6 +21,15 @@ struct ParsedCardFields {
     var rawText: String = ""
 }
 
+/// One line of OCR'd text plus its normalized bounding-box height (0...1, a fraction of the
+/// photo's height) — carried alongside the text so `OCRService.parse` can use relative font
+/// size as a signal, not just top-to-bottom position. See the doc-comment on
+/// `isPlausiblePersonalNameLine` for why this exists.
+struct RecognizedLine {
+    let text: String
+    let height: CGFloat
+}
+
 /// Fully on-device text recognition (Vision framework) + a simple heuristic field parser.
 /// No network request is ever made — this is what keeps card scanning offline.
 enum OCRService {
@@ -72,8 +81,9 @@ enum OCRService {
     ]
 
     /// Runs on-device text recognition on the given image and returns the recognized lines,
-    /// ordered top-to-bottom, left-to-right (a best-effort approximation of reading order).
-    static func recognizeText(in image: UIImage, completion: @escaping ([String]) -> Void) {
+    /// ordered top-to-bottom, left-to-right (a best-effort approximation of reading order),
+    /// each carrying its normalized bounding-box height alongside the text.
+    static func recognizeText(in image: UIImage, completion: @escaping ([RecognizedLine]) -> Void) {
         guard let cgImage = image.cgImage else {
             completion([])
             return
@@ -92,7 +102,10 @@ enum OCRService {
                 }
                 return lhs.boundingBox.origin.x < rhs.boundingBox.origin.x
             }
-            let lines = sorted.compactMap { $0.topCandidates(1).first?.string }
+            let lines: [RecognizedLine] = sorted.compactMap { observation in
+                guard let text = observation.topCandidates(1).first?.string else { return nil }
+                return RecognizedLine(text: text, height: observation.boundingBox.height)
+            }
             completion(lines)
         }
         request.recognitionLevel = .accurate
@@ -115,14 +128,14 @@ enum OCRService {
     /// (business cards conventionally put the name first, then title, then company).
     /// This is intentionally simple — it's a starting point for the user to correct,
     /// not an attempt at true field understanding.
-    static func parse(lines: [String]) -> ParsedCardFields {
+    static func parse(lines: [RecognizedLine]) -> ParsedCardFields {
         var result = ParsedCardFields()
-        result.rawText = lines.joined(separator: "\n")
+        result.rawText = lines.map(\.text).joined(separator: "\n")
 
-        var remainingLines: [String] = []
+        var remainingLines: [RecognizedLine] = []
 
         for rawLine in lines {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            let line = rawLine.text.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
             let range = NSRange(line.startIndex..<line.endIndex, in: line)
 
@@ -178,7 +191,7 @@ enum OCRService {
                 }
             }
 
-            remainingLines.append(line)
+            remainingLines.append(RecognizedLine(text: line, height: rawLine.height))
         }
 
         // Company and address are pulled out by keyword wherever they appear, BEFORE the
@@ -186,9 +199,10 @@ enum OCRService {
         // number is almost never mistaken for something else, whereas "the company name is
         // always the 3rd line" breaks the moment a card leads with a logo, a slogan, or the
         // company name in bigger type at the very top.
-        var positionalLines: [String] = []
+        var positionalLines: [RecognizedLine] = []
         var addressLines: [String] = []
-        for line in remainingLines {
+        for entry in remainingLines {
+            let line = entry.text
             if result.company.isEmpty, containsAny(line, companyKeywords) {
                 result.company = line
                 continue
@@ -197,18 +211,42 @@ enum OCRService {
                 addressLines.append(line)
                 continue
             }
-            positionalLines.append(line)
+            positionalLines.append(entry)
         }
 
-        if positionalLines.count > 0 { result.name = positionalLines[0] }
-        if positionalLines.count > 1 { result.jobTitle = positionalLines[1] }
+        // Catches the common case a keyword match alone can't: a company/brand line with NO
+        // legal-entity suffix printed on it at all (e.g. a plain "台積電" or "ASUS"-style logo
+        // line, with the full legal name only appearing elsewhere on the card, smaller) sitting
+        // ABOVE the person's name — which the old purely-positional fallback below would always
+        // hand to `name` just for being first. A line that's noticeably larger than the card's
+        // median line height AND doesn't read like a plausible short personal name is very
+        // unlikely to be one, so it's pulled out here and offered to `company` instead, before
+        // position ever gets a say. See `isPlausiblePersonalNameLine` for exactly what counts.
+        if !positionalLines.isEmpty {
+            let sortedHeights = positionalLines.map(\.height).sorted()
+            let medianHeight = sortedHeights[sortedHeights.count / 2]
+            var stillPositional: [RecognizedLine] = []
+            for entry in positionalLines {
+                if result.company.isEmpty,
+                   entry.height > medianHeight * 1.5,
+                   !isPlausiblePersonalNameLine(entry.text) {
+                    result.company = entry.text
+                    continue
+                }
+                stillPositional.append(entry)
+            }
+            positionalLines = stillPositional
+        }
+
+        if positionalLines.count > 0 { result.name = positionalLines[0].text }
+        if positionalLines.count > 1 { result.jobTitle = positionalLines[1].text }
         var nextIndex = 2
         if result.company.isEmpty, positionalLines.count > 2 {
-            result.company = positionalLines[2]
+            result.company = positionalLines[2].text
             nextIndex = 3
         }
         if positionalLines.count > nextIndex {
-            addressLines.append(contentsOf: positionalLines[nextIndex...])
+            addressLines.append(contentsOf: positionalLines[nextIndex...].map(\.text))
         }
         if !addressLines.isEmpty {
             result.address = addressLines.joined(separator: " ")
@@ -223,6 +261,42 @@ enum OCRService {
 
     private static func containsAny(_ line: String, _ keywords: [String]) -> Bool {
         keywords.contains { line.localizedCaseInsensitiveContains($0) }
+    }
+
+    /// A conservative shape-check for "this line could plausibly BE a person's name" — used
+    /// only to decide whether an unusually large line should be excluded from name candidacy
+    /// (see the "brand banner" pass in `parse` above), never to positively assert something IS
+    /// a name. Two shapes are accepted: a short run of 2-4 CJK ideographs with nothing else
+    /// mixed in (covers the vast majority of Chinese personal names, which this parser already
+    /// has to handle well since the whole app is built around Taiwan business cards), or 1-3
+    /// space-separated words of letters only, allowing the punctuation ordinary Latin names use
+    /// (periods, apostrophes, hyphens, a trailing comma for "Chen, David" ordering) and capped
+    /// at 30 characters so a run-on English company tagline doesn't slip through. Anything with
+    /// digits, a company legal-suffix word (already filtered out earlier by `companyKeywords`
+    /// before this ever runs), or an unusual shape falls through to `false`, which is the safe
+    /// default here — better to leave a genuinely ambiguous large line where it was (positional
+    /// fallback still applies to it) than to wrongly claim it looks name-shaped.
+    private static func isPlausiblePersonalNameLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+
+        if (2...4).contains(trimmed.count),
+           trimmed.unicodeScalars.allSatisfy({ scalar in
+               (0x4E00...0x9FFF).contains(scalar.value) || (0x3400...0x4DBF).contains(scalar.value)
+           }) {
+            return true
+        }
+
+        let words = trimmed.split(separator: " ")
+        if (1...3).contains(words.count),
+           trimmed.count <= 30,
+           words.allSatisfy({ word in
+               word.allSatisfy { $0.isLetter || $0 == "." || $0 == "'" || $0 == "-" || $0 == "," }
+           }) {
+            return true
+        }
+
+        return false
     }
 
     /// True when front and back disagree on at least one of the fields `merge` would
