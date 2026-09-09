@@ -83,6 +83,16 @@ struct CardFormView: View {
     // no separate flag that can fall out of sync with it.
     @State private var duplicateCandidate: BusinessCard?
 
+    // Shown right after `updateExisting()` finishes — an on-screen echo of exactly what the
+    // merge produced (read straight off the saved `card`, not re-derived or guessed), so a
+    // real-device test can tell at a glance whether the merge actually ran, instead of only
+    // being able to infer it later from the card list. If this alert doesn't appear at all
+    // after tapping 「更新舊名片」, the installed build predates this feature; if it appears
+    // but the field shown doesn't match what's on the card afterward, that's a different,
+    // narrower bug (display/persistence) worth reporting separately from "merge didn't run".
+    @State private var mergeSummary: String?
+    @State private var pendingFinishedCard: BusinessCard?
+
     private var isEditing: Bool { existingCard != nil }
 
     var body: some View {
@@ -273,6 +283,24 @@ struct CardFormView: View {
                     duplicateCandidate = nil
                 }
             )
+        }
+        // See the doc-comment on `mergeSummary` above for why this exists: it's the empirical
+        // proof, on the device itself, of what 「更新舊名片」actually just wrote to the card.
+        .alert(
+            "已合併新舊資料",
+            isPresented: Binding(
+                get: { mergeSummary != nil },
+                set: { isPresented in if !isPresented { mergeSummary = nil } }
+            )
+        ) {
+            Button("好") {
+                if let card = pendingFinishedCard {
+                    pendingFinishedCard = nil
+                    finish(with: card)
+                }
+            }
+        } message: {
+            Text(mergeSummary ?? "")
         }
     }
 
@@ -525,7 +553,28 @@ struct CardFormView: View {
         card.interactions += interactions
         applyExtras(to: card)
         enforceSingleMyCard(keeping: card)
-        finish(with: card)
+        // Not `finish(with: card)` directly — see `mergeSummary` above. The alert's "好"
+        // button is what actually calls `finish(with:)` once the user has seen the result.
+        mergeSummary = mergeSummaryText(for: card)
+        pendingFinishedCard = card
+    }
+
+    /// Builds the on-screen confirmation text for the post-merge alert, reading every value
+    /// straight off the just-merged `card`, never recomputed or duplicated logic, so this
+    /// can't drift out of sync with what `updateExisting()` above actually wrote.
+    private func mergeSummaryText(for card: BusinessCard) -> String {
+        var lines: [String] = []
+        lines.append("姓名:\(card.name.isEmpty ? "(未命名)" : card.name)")
+        if !card.company.isEmpty { lines.append("公司:\(card.company)") }
+        lines.append("電話 \(card.phones.count) 筆、Email \(card.emails.count) 筆")
+        if !card.tags.isEmpty {
+            lines.append("標籤:\(card.tags.map(\.name).joined(separator: "、"))")
+        }
+        let olderPhotoCount = card.additionalFrontImagePaths.count + card.additionalBackImagePaths.count
+        if olderPhotoCount > 0 {
+            lines.append("更早的照片:\(olderPhotoCount) 張(在名片詳細頁可以看)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Unions an existing card's phones/emails with the newly-entered set, de-duplicating by
@@ -539,7 +588,15 @@ struct CardFormView: View {
     ) -> [ContactField] {
         var seen = Set<String>()
         var result: [ContactField] = []
-        for field in existing + new {
+        // `new` goes first so that when the same number/address shows up on both sides, the
+        // freshly-entered entry's TYPE wins over the old one — e.g. if this pass corrects a
+        // phone that got OCR-misclassified as 其他 the first time to 手機, that correction
+        // actually sticks instead of being silently discarded in favor of the stale old type
+        // (which is what iterating `existing + new` here used to do — first-seen-wins meant
+        // the old, uncorrected entry always survived the dedupe). Any OLD entry whose number/
+        // address isn't re-entered this pass still gets appended afterward, so nothing already
+        // on file is lost — the union guarantee itself is unchanged, only which copy wins is.
+        for field in new + existing {
             let normalized = key(field)
             guard !normalized.isEmpty, !seen.contains(normalized) else { continue }
             seen.insert(normalized)
