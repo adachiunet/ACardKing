@@ -93,6 +93,11 @@ struct CardFormView: View {
     @State private var mergeSummary: String?
     @State private var pendingFinishedCard: BusinessCard?
 
+    // Drives the full-screen zoomable photo viewer for the "名片照片" section below — see the
+    // doc-comment on the equivalent property in CardDetailView for why this is one Identifiable
+    // value instead of a separate Bool + photos/index trio.
+    @State private var photoViewerRequest: PhotoViewerRequest?
+
     private var isEditing: Bool { existingCard != nil }
 
     var body: some View {
@@ -232,15 +237,23 @@ struct CardFormView: View {
             }
 
             if frontImagePath != nil || backImagePath != nil {
-                Section("名片照片") {
+                Section {
                     HStack {
                         if let path = frontImagePath, let img = ImageStorageService.load(path) {
                             Image(uiImage: img).resizable().scaledToFit().frame(height: 120)
+                                .contentShape(Rectangle())
+                                .onTapGesture { openPhotoViewer(startAt: 0) }
                         }
                         if let path = backImagePath, let img = ImageStorageService.load(path) {
                             Image(uiImage: img).resizable().scaledToFit().frame(height: 120)
+                                .contentShape(Rectangle())
+                                .onTapGesture { openPhotoViewer(startAt: frontImagePath != nil ? 1 : 0) }
                         }
                     }
+                } header: {
+                    Text("名片照片")
+                } footer: {
+                    Text("點照片可放大檢視,方便核對辨識或輸入的文字是否正確。")
                 }
             }
 
@@ -302,6 +315,27 @@ struct CardFormView: View {
         } message: {
             Text(mergeSummary ?? "")
         }
+        .fullScreenCover(item: $photoViewerRequest) { request in
+            PhotoViewerView(photos: request.photos, initialIndex: request.initialIndex)
+        }
+    }
+
+    // MARK: - Photo zoom viewer
+
+    /// Loads and labels whichever of front/back are currently set, fresh at tap time (not kept
+    /// as `@State`) — mirrors `CardDetailView.currentCardPhotos`, but reads from this form's own
+    /// `frontImagePath`/`backImagePath` state rather than a saved `BusinessCard`, since here the
+    /// user may be reviewing a scan that hasn't been saved yet at all.
+    private func openPhotoViewer(startAt index: Int) {
+        var photos: [ViewablePhoto] = []
+        if let path = frontImagePath, let img = ImageStorageService.load(path) {
+            photos.append(ViewablePhoto(label: "正面", image: img))
+        }
+        if let path = backImagePath, let img = ImageStorageService.load(path) {
+            photos.append(ViewablePhoto(label: "反面", image: img))
+        }
+        guard !photos.isEmpty else { return }
+        photoViewerRequest = PhotoViewerRequest(photos: photos, startAt: min(index, photos.count - 1))
     }
 
     private var tagPicker: some View {

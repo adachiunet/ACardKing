@@ -12,6 +12,14 @@ struct CardDetailView: View {
     @State private var exportFile: ExportFile?
     @State private var newInteractionText = ""
 
+    // Drives the full-screen zoomable photo viewer — set together (photos + which page to
+    // open on) right before presenting, from whichever thumbnail was tapped (header avatar,
+    // the front/back pair in "名片照片", or one of the "更早的照片"). `.fullScreenCover(item:)`
+    // below needs its own wrapper struct since two `@State` values changing isn't atomic from
+    // SwiftUI's point of view — a plain `Bool` flag could present the sheet a beat before
+    // `photoViewerPhotos`/`photoViewerIndex` have both updated to match the tapped photo.
+    @State private var photoViewerRequest: PhotoViewerRequest?
+
     var body: some View {
         List {
             headerSection
@@ -84,15 +92,25 @@ struct CardDetailView: View {
                 }
             }
             if card.frontImagePath != nil || card.backImagePath != nil {
-                Section("名片照片") {
+                Section {
                     HStack {
                         if let path = card.frontImagePath, let img = ImageStorageService.load(path) {
                             Image(uiImage: img).resizable().scaledToFit()
+                                .contentShape(Rectangle())
+                                .onTapGesture { openPhotoViewer(currentCardPhotos, startAt: 0) }
                         }
                         if let path = card.backImagePath, let img = ImageStorageService.load(path) {
                             Image(uiImage: img).resizable().scaledToFit()
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    openPhotoViewer(currentCardPhotos, startAt: card.frontImagePath != nil ? 1 : 0)
+                                }
                         }
                     }
+                } header: {
+                    Text("名片照片")
+                } footer: {
+                    Text("點照片可放大檢視,方便核對辨識或輸入的文字是否正確。")
                 }
             }
 
@@ -102,23 +120,32 @@ struct CardDetailView: View {
             // accumulate any, but never deleted, so they need to be reachable somewhere.
             let olderPhotoPaths = card.additionalFrontImagePaths + card.additionalBackImagePaths
             if !olderPhotoPaths.isEmpty {
+                // Loaded once up front (rather than inside the ForEach below) specifically so
+                // the displayed thumbnails and the tap-to-open index always refer to the same
+                // list — a path whose file is missing is simply absent from `olderPhotos`, so
+                // it can never desync the two the way re-deriving them separately could (a
+                // missing file partway through the list would otherwise shift every later
+                // photo's index between "what's shown" and "what tapping it opens").
+                let olderPhotos = olderViewablePhotos(from: olderPhotoPaths)
                 Section {
-                    DisclosureGroup("更早的照片(\(olderPhotoPaths.count))") {
+                    DisclosureGroup("更早的照片(\(olderPhotos.count))") {
                         ScrollView(.horizontal) {
                             HStack {
-                                ForEach(olderPhotoPaths, id: \.self) { path in
-                                    if let img = ImageStorageService.load(path) {
-                                        Image(uiImage: img)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(height: 100)
-                                    }
+                                ForEach(Array(olderPhotos.enumerated()), id: \.element.id) { index, photo in
+                                    Image(uiImage: photo.image)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(height: 100)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            openPhotoViewer(olderPhotos, startAt: index)
+                                        }
                                 }
                             }
                         }
                     }
                 } footer: {
-                    Text("重複更新這張名片、又掃到不同的照片時,舊照片會留在這裡,不會被刪除。")
+                    Text("重複更新這張名片、又掃到不同的照片時,舊照片會留在這裡,不會被刪除。點照片可放大檢視。")
                 }
             }
         }
@@ -166,6 +193,9 @@ struct CardDetailView: View {
         .sheet(item: $exportFile) { file in
             ShareSheet(items: file.items)
         }
+        .fullScreenCover(item: $photoViewerRequest) { request in
+            PhotoViewerView(photos: request.photos, initialIndex: request.initialIndex)
+        }
     }
 
     private var headerSection: some View {
@@ -177,6 +207,8 @@ struct CardDetailView: View {
                         .scaledToFill()
                         .frame(width: 60, height: 60)
                         .clipShape(Circle())
+                        .contentShape(Circle())
+                        .onTapGesture { openPhotoViewer(currentCardPhotos, startAt: 0) }
                 }
                 VStack(alignment: .leading) {
                     Text(card.name.isEmpty ? "未命名" : card.name)
@@ -236,5 +268,37 @@ struct CardDetailView: View {
         let sorted = card.interactions.sorted(by: { $0.date > $1.date })
         let idsToRemove = Set(offsets.map { sorted[$0].id })
         card.interactions.removeAll { idsToRemove.contains($0.id) }
+    }
+
+    // MARK: - Photo zoom viewer
+
+    /// This card's CURRENT front/back photos (not the older, bumped-out ones — see
+    /// `olderViewablePhotos`), loaded fresh and labeled for `PhotoViewerView`. Used by both
+    /// the header avatar and the "名片照片" section so tapping either one opens the same
+    /// swipeable front↔back pair, just starting on whichever side was actually tapped.
+    private var currentCardPhotos: [ViewablePhoto] {
+        var photos: [ViewablePhoto] = []
+        if let path = card.frontImagePath, let img = ImageStorageService.load(path) {
+            photos.append(ViewablePhoto(label: "正面", image: img))
+        }
+        if let path = card.backImagePath, let img = ImageStorageService.load(path) {
+            photos.append(ViewablePhoto(label: "反面", image: img))
+        }
+        return photos
+    }
+
+    /// Loads and labels the "更早的照片" strip's images for `PhotoViewerView` — built on tap
+    /// rather than kept as `@State`, since these only ever need to exist for the moment the
+    /// viewer is open.
+    private func olderViewablePhotos(from paths: [String]) -> [ViewablePhoto] {
+        paths.enumerated().compactMap { index, path in
+            guard let img = ImageStorageService.load(path) else { return nil }
+            return ViewablePhoto(label: "更早的照片 \(index + 1)/\(paths.count)", image: img)
+        }
+    }
+
+    private func openPhotoViewer(_ photos: [ViewablePhoto], startAt index: Int) {
+        guard !photos.isEmpty else { return }
+        photoViewerRequest = PhotoViewerRequest(photos: photos, startAt: index)
     }
 }
