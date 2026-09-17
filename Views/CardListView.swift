@@ -66,17 +66,19 @@ struct CardListView: View {
         // as you type more characters" search box actually needs.
         // Keywords separated by spaces use OR logic: match any keyword in any field.
         let queryText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let keywords = queryText.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let keywords = queryText.split(separator: " ", omittingEmptySubsequences: true)
+            .map { Self.searchNormalized(String($0)) }
         let matched = allCards.filter { card in
             let matchesTags = selectedTags.isEmpty || !Set(card.tags).isDisjoint(with: selectedTags)
             guard matchesTags else { return false }
             guard !favoritesOnly || card.isFavorite else { return false }
             guard !keywords.isEmpty else { return true }
 
-            let haystacks = [card.name, card.company, card.jobTitle, card.department, card.taxId, card.notes]
+            let haystacks = ([card.name, card.company, card.jobTitle, card.department, card.taxId, card.notes]
                 + card.phones.map { $0.value }
                 + card.emails.map { $0.value }
-                + card.tags.map { $0.name }
+                + card.tags.map { $0.name })
+                .map { Self.searchNormalized($0) }
             // Match if ANY keyword appears in ANY haystack field (OR logic)
             return keywords.contains { keyword in
                 haystacks.contains {
@@ -94,6 +96,40 @@ struct CardListView: View {
         case .company:
             return matched.sorted { $0.company.localizedStandardCompare($1.company) == .orderedAscending }
         }
+    }
+
+    /// ICU's registered "Traditional-Simplified" transliterator — folds Traditional Chinese
+    /// text to its Simplified form. Constructed once and reused rather than rebuilt on every
+    /// call.
+    private static let toSimplifiedChinese = StringTransform(rawValue: "Traditional-Simplified")
+
+    /// Normalizes text for SEARCH COMPARISON ONLY (never used for display or storage — the
+    /// card's actual fields are untouched). Fixes a real report: a card added by scanning
+    /// (Vision OCR, `OCRService`) had "黃" in its name and searching "黃" (typed via the normal
+    /// keyboard) returned nothing, while a manually-typed "陳" name searched fine.
+    ///
+    /// Two distinct problems layer on top of each other here:
+    ///  1. NFKC folds Unicode's CJK Compatibility Ideographs (their canonical duplicate
+    ///     encodings) into their standard form — cheap, always-safe general hygiene.
+    ///  2. Traditional→Simplified folding is the actual fix for the reported bug. Two
+    ///     characters can render identically as "黃" yet be genuinely different Unicode
+    ///     codepoints — Traditional 黃 vs its Simplified counterpart 黄 — and Vision's OCR
+    ///     model can produce one while the user's own keyboard produces the other. A plain
+    ///     `range(of:)` substring check (even case/diacritic-insensitive) treats those as two
+    ///     unrelated characters and never matches. Folding both the query and every haystack
+    ///     field to Simplified before comparing makes the two forms search-equivalent, however
+    ///     either one was entered — OCR scan or manual typing, either search box or stored data.
+    ///     Simplified (not Traditional) is the fold target specifically because Traditional→
+    ///     Simplified is the deterministic many-to-one direction; folding the other way can be
+    ///     ambiguous for characters simplification merged from more than one Traditional
+    ///     original.
+    ///
+    /// `applyingTransform` can return nil if the transform is ever unavailable — falls back to
+    /// just the NFKC form rather than the raw string, so this can only ever make matching more
+    /// permissive than before, never less.
+    private static func searchNormalized(_ text: String) -> String {
+        let nfkc = text.precomposedStringWithCompatibilityMapping
+        return nfkc.applyingTransform(toSimplifiedChinese, reverse: false) ?? nfkc
     }
 
     var body: some View {
