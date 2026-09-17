@@ -104,6 +104,18 @@ private struct QRScannerView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {}
 
+    // `startScanning()` in `makeUIViewController` spins up an underlying AVCaptureSession.
+    // Per Apple's docs, that session must be torn down with `stopScanning()` before the
+    // controller is released — SwiftUI deallocating it on its own (when `ScanQRCardView`'s
+    // `stage` switches away from `.scanning`, or the sheet is dismissed/cancelled) does NOT
+    // do this for you. Without this, the capture session can keep running after the camera
+    // preview is gone: the camera-in-use indicator can linger, the session competes with any
+    // camera use elsewhere in the app (e.g. `DocumentScannerView`), and battery drains for a
+    // session nothing is reading from anymore.
+    static func dismantleUIViewController(_ uiViewController: DataScannerViewController, coordinator: Coordinator) {
+        uiViewController.stopScanning()
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(onDetect: onDetect) }
 
     final class Coordinator: NSObject, DataScannerViewControllerDelegate {
@@ -126,6 +138,10 @@ private struct QRScannerView: UIViewControllerRepresentable {
             for item in addedItems {
                 if case .barcode(let barcode) = item, let payload = barcode.payloadStringValue {
                     didFire = true
+                    // Stop the capture session the moment we have what we need, rather than
+                    // waiting for SwiftUI to eventually tear the view down — the camera should
+                    // stop as soon as the QR code is actually read, not just "soon after".
+                    dataScanner.stopScanning()
                     onDetect(payload)
                     break
                 }

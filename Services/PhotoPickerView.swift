@@ -43,16 +43,28 @@ struct PhotoPickerView: UIViewControllerRepresentable {
             // written into a pre-sized, index-addressed array rather than appended — that
             // keeps the final order matching the order the user picked them in even if the
             // loads themselves finish in a different order.
+            //
+            // SAFETY: `itemProvider.loadObject`'s completion handler is NOT guaranteed to run
+            // on the main thread (Apple's docs explicitly call this out as "an arbitrary
+            // background queue"), so with `selectionLimit = 0` (batch picking, potentially
+            // dozens of photos) this fires many of these completions concurrently. Writing
+            // directly into a shared `[UIImage?]` from those concurrent callbacks is a data
+            // race — Swift arrays give no thread-safety guarantee for concurrent mutation, and
+            // this can trap under exclusivity checking or silently corrupt/drop entries in
+            // Release. Every write (and the paired `group.leave()`) is funneled through the
+            // main queue below so the array only ever changes from one thread at a time.
             var images = [UIImage?](repeating: nil, count: results.count)
             let group = DispatchGroup()
             for (index, result) in results.enumerated() {
                 guard result.itemProvider.canLoadObject(ofClass: UIImage.self) else { continue }
                 group.enter()
                 result.itemProvider.loadObject(ofClass: UIImage.self) { object, _ in
-                    if let image = object as? UIImage {
-                        images[index] = image
+                    DispatchQueue.main.async {
+                        if let image = object as? UIImage {
+                            images[index] = image
+                        }
+                        group.leave()
                     }
-                    group.leave()
                 }
             }
             group.notify(queue: .main) {

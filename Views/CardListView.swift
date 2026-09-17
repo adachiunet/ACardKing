@@ -20,7 +20,7 @@ enum CardSortOption: String, CaseIterable, Identifiable {
     }
 }
 
-/// The app's home screen: search、tag-filter, and the full list of cards, plus every
+/// The app's home screen: search, tag-filter, and the full list of cards, plus every
 /// entry point for adding cards (manual, single scan, batch camera scan, batch photo-library
 /// import) and for the app's data-portability features (vCard/CSV export, full backup
 /// export/import).
@@ -64,19 +64,24 @@ struct CardListView: View {
         // `range(of:options:)` below is a plain, unambiguous "does this substring appear
         // anywhere" search (still case- and diacritic-insensitive), which is what a "narrows
         // as you type more characters" search box actually needs.
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Keywords separated by spaces use OR logic: match any keyword in any field.
+        let queryText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keywords = queryText.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         let matched = allCards.filter { card in
             let matchesTags = selectedTags.isEmpty || !Set(card.tags).isDisjoint(with: selectedTags)
             guard matchesTags else { return false }
             guard !favoritesOnly || card.isFavorite else { return false }
-            guard !query.isEmpty else { return true }
+            guard !keywords.isEmpty else { return true }
 
             let haystacks = [card.name, card.company, card.jobTitle, card.department, card.taxId, card.notes]
                 + card.phones.map { $0.value }
                 + card.emails.map { $0.value }
                 + card.tags.map { $0.name }
-            return haystacks.contains {
-                $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            // Match if ANY keyword appears in ANY haystack field (OR logic)
+            return keywords.contains { keyword in
+                haystacks.contains {
+                    $0.range(of: keyword, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+                }
             }
         }
         switch sortOption {

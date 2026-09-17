@@ -291,6 +291,14 @@ struct BatchScanView: View {
     /// Runs OCR on each captured image one at a time (chained via the completion handler,
     /// always hopping back to the main thread) so mutating the shared `items` array never
     /// races across threads.
+    ///
+    /// `OCRService.recognizeText`'s completion already arrives on a background queue. The
+    /// parse step is cheap, but `ImageStorageService.save` is a synchronous JPEG encode +
+    /// disk write — for a batch of a few dozen full-resolution camera photos, doing that on
+    /// the main thread (as this used to, inside the `DispatchQueue.main.async` below) adds up
+    /// across the whole loop and stalls the UI/progress counter. Both are done here, still on
+    /// the background queue, and only the resulting values cross to main to mutate `items` —
+    /// the actual shared-state write stays exactly as single-threaded as before.
     private func recognizeNext(index: Int) {
         guard index < items.count else {
             stage = items.isEmpty ? .empty : .pairing
@@ -298,9 +306,11 @@ struct BatchScanView: View {
         }
         let image = items[index].image
         OCRService.recognizeText(in: image) { lines in
+            let parsed = OCRService.parse(lines: lines)
+            let savedPath = ImageStorageService.save(image)
             DispatchQueue.main.async {
-                items[index].parsed = OCRService.parse(lines: lines)
-                items[index].frontImagePath = ImageStorageService.save(image)
+                items[index].parsed = parsed
+                items[index].frontImagePath = savedPath
                 processedCount += 1
                 recognizeNext(index: index + 1)
             }
