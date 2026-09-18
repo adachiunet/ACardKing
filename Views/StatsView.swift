@@ -16,7 +16,9 @@ struct StatsView: View {
     }
 
     private var favoriteCount: Int { cards.filter(\.isFavorite).count }
-    private var pendingFollowUpCount: Int { cards.filter { $0.followUpDate != nil }.count }
+    private var pendingFollowUpCount: Int {
+        cards.filter { $0.followUpTasks.contains(where: { !$0.isCompleted }) }.count
+    }
 
     private var topCompanies: [(name: String, count: Int)] {
         grouped(cards.map(\.company))

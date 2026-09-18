@@ -12,6 +12,38 @@ enum VCardParser {
     /// Returns nil when `text` doesn't look like a vCard at all (e.g. the QR code was just a
     /// URL or plain text) — callers should fall back to showing the raw scanned text instead
     /// of silently producing an empty card.
+    /// Splits a file that may contain more than one vCard back-to-back (common in another app's
+    /// "export all contacts" .vcf) into its individual `BEGIN:VCARD...END:VCARD` blocks and
+    /// parses each one with `parse(_:)`. A file with exactly one vCard just returns a
+    /// single-element array, so this is a safe superset of the single-card path — `parse(_:)`
+    /// itself is unchanged and still what the QR-scan flow (`ScanQRCardView`) calls directly.
+    /// Returns an empty array (never nil) when the file has no BEGIN:VCARD block at all, so
+    /// callers can treat "empty" and "not a vCard file" the same way.
+    static func parseMultiple(_ text: String) -> [ParsedCardFields] {
+        guard text.uppercased().contains("BEGIN:VCARD") else { return [] }
+
+        var blocks: [String] = []
+        var currentLines: [String] = []
+        var insideCard = false
+        for line in text.components(separatedBy: .newlines) {
+            switch line.trimmingCharacters(in: .whitespaces).uppercased() {
+            case "BEGIN:VCARD":
+                insideCard = true
+                currentLines = [line]
+            case "END:VCARD":
+                if insideCard {
+                    currentLines.append(line)
+                    blocks.append(currentLines.joined(separator: "\n"))
+                }
+                insideCard = false
+                currentLines = []
+            default:
+                if insideCard { currentLines.append(line) }
+            }
+        }
+        return blocks.compactMap { parse($0) }
+    }
+
     static func parse(_ text: String) -> ParsedCardFields? {
         guard text.uppercased().contains("BEGIN:VCARD") else { return nil }
 

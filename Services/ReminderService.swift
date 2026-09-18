@@ -2,17 +2,16 @@ import Foundation
 import UserNotifications
 
 /// Schedules/cancels the local (on-device only, no push server, no network involved at all)
-/// notification behind a card's 追蹤提醒 (follow-up reminder) date. `BusinessCard.followUpDate`
-/// is the single source of truth — every call here just makes the OS notification match
-/// whatever that field currently says, keyed by the card's own `id` so re-scheduling or
-/// cancelling always targets the right one and never leaves stale notifications behind after
-/// the date is changed, cleared, or the card itself is deleted.
+/// notifications behind a card's 追蹤提醒 tasks (`BusinessCard.followUpTasks`). Each task gets
+/// its own notification, keyed by `cardID` + the task's own `id`, so adding, completing, or
+/// deleting one task never disturbs another task's notification — the whole point of moving from
+/// a single `followUpDate` to a list.
 enum ReminderService {
-    /// Must be called (and its result respected) before the first `schedule(for:)` — iOS shows
-    /// the system permission prompt only once; if the user denies it, `add(_:)` silently no-ops
-    /// on all iOS versions, so the reminder date would otherwise be saved but never actually
-    /// fire with no indication why. Callers should check the returned Bool and let the user know
-    /// if it came back false (Settings → 通知 to turn it back on).
+    /// Must be called (and its result respected) before the first `schedule(...)` — iOS shows
+    /// the system permission prompt only once; if the user denies it, notifications silently
+    /// no-op on all iOS versions, so a task would otherwise be saved but never actually fire with
+    /// no indication why. Callers should check the returned Bool and let the user know if it
+    /// came back false (Settings → 通知 to turn it back on).
     static func requestAuthorizationIfNeeded(completion: @escaping (Bool) -> Void) {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
@@ -31,35 +30,74 @@ enum ReminderService {
         }
     }
 
-    private static func identifier(for cardID: UUID) -> String {
+    private static func identifier(cardID: UUID, taskID: UUID) -> String {
+        "followup-\(cardID.uuidString)-\(taskID.uuidString)"
+    }
+
+    /// The identifier this service used back when a card could only ever have ONE follow-up
+    /// date (before `FollowUpTask`). Only referenced by `cancelLegacy` below, which the app's
+    /// one-time startup migration uses to clean up a notification scheduled under the old naming
+    /// scheme before re-scheduling it under the new per-task one — nothing else should ever use
+    /// this format again.
+    private static func legacyIdentifier(cardID: UUID) -> String {
         "followup-\(cardID.uuidString)"
     }
 
-    /// Schedules a one-time local notification at `date` for this card, replacing any reminder
-    /// already scheduled for it (adding with the same identifier overwrites in place, so this
-    /// never needs to cancel-then-add separately). A `date` already in the past still gets
-    /// scheduled — `UNCalendarNotificationTrigger` simply won't fire it, which is harmless and
-    /// keeps the caller (CardFormView) simple: it doesn't need to guard against "did the user
-    /// just pick today's date after the reminder hour already passed".
-    static func schedule(cardID: UUID, name: String, date: Date) {
+    /// Cancels a notification scheduled under the pre-`FollowUpTask` single-per-card identifier.
+    /// Called exactly once per card by `CardKingApp.migrateLegacyFollowUpDates` — an old
+    /// installed build may have left one of these pending, and since the new code never looks
+    /// for that identifier again, it would otherwise linger forever as an orphaned notification.
+    static func cancelLegacy(cardID: UUID) {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [legacyIdentifier(cardID: cardID)])
+    }
+
+    /// Schedules (or replaces, if one already exists for this task) the local notification for
+    /// ONE follow-up task. A completed task is never scheduled — pass it here only to make sure
+    /// any previously-scheduled notification for it gets cancelled instead (same effect as
+    /// calling `cancel` directly).
+    static func schedule(cardID: UUID, name: String, task: FollowUpTask) {
+        guard !task.isCompleted else {
+            cancel(cardID: cardID, taskID: task.id)
+            return
+        }
         let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: [identifier(for: cardID)])
+        let identifier = identifier(cardID: cardID, taskID: task.id)
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
 
         let content = UNMutableNotificationContent()
         content.title = "追蹤提醒"
-        content.body = name.isEmpty ? "該聯絡這位名片聯絡人了" : "該聯絡「\(name)」了"
+        let who = name.isEmpty ? "這位名片聯絡人" : "「\(name)」"
+        content.body = task.note.isEmpty ? "該聯絡\(who)了" : "\(who):\(task.note)"
         content.sound = .default
 
-        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: task.dueDate)
         let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-        let request = UNNotificationRequest(identifier: identifier(for: cardID), content: content, trigger: trigger)
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
         center.add(request)
     }
 
-    /// Cancels this card's reminder, if any — called when the user clears the follow-up date,
-    /// or when the card is deleted (soft- or permanently) so it doesn't fire for a contact
-    /// that's no longer in the list.
-    static func cancel(cardID: UUID) {
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier(for: cardID)])
+    /// Cancels one task's notification — called when that task is deleted, marked complete, or
+    /// its card is deleted.
+    static func cancel(cardID: UUID, taskID: UUID) {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier(cardID: cardID, taskID: taskID)])
+    }
+
+    /// Re-syncs every task's notification for a card in one call — schedules the ones that
+    /// aren't done yet, cancels the ones that are. Call this after any edit to a card's
+    /// `followUpTasks` (add/edit/complete/delete) so the OS notification set can never drift
+    /// out of sync with what's actually on the card.
+    static func syncAll(cardID: UUID, name: String, tasks: [FollowUpTask]) {
+        for task in tasks {
+            schedule(cardID: cardID, name: name, task: task)
+        }
+    }
+
+    /// Cancels every one of a card's task notifications by id — used when the card itself is
+    /// deleted (soft or permanent) or is being cleared of all follow-ups (e.g. marked as 我的
+    /// 名片, which never carries any).
+    static func cancelAll(cardID: UUID, taskIDs: [UUID]) {
+        guard !taskIDs.isEmpty else { return }
+        let identifiers = taskIDs.map { identifier(cardID: cardID, taskID: $0) }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiers)
     }
 }

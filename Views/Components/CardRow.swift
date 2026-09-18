@@ -2,7 +2,9 @@ import SwiftUI
 import UIKit
 
 /// One row in the main card list: a small avatar (photo if available, initial otherwise),
-/// name, company/title, and up to a few tag chips.
+/// name, company/title, and up to a few tag chips — wrapped in `.cardStyle()` so the list reads
+/// as a stack of individual name-card-style tiles rather than a plain system list, per the
+/// app's overall 商務風格 (see `Theme`).
 struct CardRow: View {
     let card: BusinessCard
 
@@ -16,7 +18,7 @@ struct CardRow: View {
                     if card.isFavorite {
                         Image(systemName: "star.fill")
                             .font(.caption)
-                            .foregroundStyle(.yellow)
+                            .foregroundStyle(Theme.gold)
                     }
                 }
                 let subtitle = [card.jobTitle, card.department, card.company]
@@ -34,8 +36,9 @@ struct CardRow: View {
                     }
                 }
             }
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 4)
+        .cardStyle()
     }
 
     @ViewBuilder
@@ -48,12 +51,12 @@ struct CardRow: View {
                 .clipShape(Circle())
         } else {
             Circle()
-                .fill(Color.accentColor.opacity(0.2))
+                .fill(Theme.navy.opacity(0.15))
                 .frame(width: 44, height: 44)
                 .overlay(
                     Text(card.name.isEmpty ? "?" : String(card.name.prefix(1)))
                         .font(.headline)
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(Theme.navy)
                 )
         }
     }

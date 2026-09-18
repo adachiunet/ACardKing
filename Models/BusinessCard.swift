@@ -49,11 +49,18 @@ final class BusinessCard {
     /// in CardListView.
     var isFavorite: Bool = false
 
-    /// 追蹤提醒 — an optional date the user wants to be reminded to follow up with this person.
-    /// `ReminderService` schedules/cancels a local notification (never a server push — nothing
-    /// about this ever leaves the device) keyed to `id`, so this field is the single source of
-    /// truth: setting it (re)schedules the notification, clearing it cancels it.
+    /// 追蹤提醒（舊版單一日期）— superseded by `followUpTasks` below, kept only so a card written
+    /// by an older installed build still decodes. `CardKingApp.migrateLegacyFollowUpDates` folds
+    /// any value still sitting here into a first `FollowUpTask` at app launch, then clears it —
+    /// nothing else in the app reads or writes this field going forward.
     var followUpDate: Date?
+
+    /// 追蹤任務清單 — a card can carry more than one pending follow-up at once (e.g. "9/20 加
+    /// LINE"、"10/1 寄簡報"), each with its own local notification (see `ReminderService`).
+    /// Purely additive relative to the old single `followUpDate` field above — same reasoning as
+    /// `additionalFrontImagePaths` elsewhere on this model: an old record simply defaults to an
+    /// empty list here until migrated.
+    var followUpTasks: [FollowUpTask] = []
 
     /// 互動紀錄 — a growing, timestamped log ("met at the expo", "discussed the contract"),
     /// as opposed to `notes` which stays a single free-text field for anything that isn't
@@ -89,6 +96,7 @@ final class BusinessCard {
         isMyCard: Bool = false,
         isFavorite: Bool = false,
         followUpDate: Date? = nil,
+        followUpTasks: [FollowUpTask] = [],
         interactions: [InteractionEntry] = []
     ) {
         self.id = UUID()
@@ -109,6 +117,7 @@ final class BusinessCard {
         self.isMyCard = isMyCard
         self.isFavorite = isFavorite
         self.followUpDate = followUpDate
+        self.followUpTasks = followUpTasks
         self.interactions = interactions
         self.isDeleted = false
         self.deletedAt = nil

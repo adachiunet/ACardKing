@@ -62,7 +62,14 @@ struct BackupCard: Codable {
     /// "unset" when decoding an older backup file that predates them, for the same reason as
     /// isMyCard above — a pre-existing export must still import cleanly.
     var isFavorite: Bool = false
+    /// Superseded by `followUpTasks` below — kept only so a backup file written by an older
+    /// build still decodes; `BackupService.importBackup` folds this into a first task (same as
+    /// `CardKingApp.migrateLegacyFollowUpDates` does for on-device data) when it's present and
+    /// `followUpTasks` is empty.
     var followUpDate: Date?
+    /// Added alongside `BusinessCard.followUpTasks`. Defaults to empty for a pre-existing backup
+    /// file that predates this, same reasoning as every other "added later" field above.
+    var followUpTasks: [FollowUpTask] = []
     var interactions: [InteractionEntry] = []
 }
 
@@ -94,6 +101,7 @@ enum BackupService {
                 isMyCard: card.isMyCard,
                 isFavorite: card.isFavorite,
                 followUpDate: card.followUpDate,
+                followUpTasks: card.followUpTasks,
                 interactions: card.interactions
             )
         }
@@ -149,6 +157,14 @@ enum BackupService {
         }
 
         for backupCard in payload.cards {
+            // A backup written by an older build only ever carries `followUpDate` (no
+            // `followUpTasks` at all) — fold it into a first task here, same idea as
+            // `CardKingApp.migrateLegacyFollowUpDates` does for data already on-device, so an
+            // imported old backup and an upgraded existing install end up in the same shape.
+            var followUpTasks = backupCard.followUpTasks
+            if followUpTasks.isEmpty, let legacyDate = backupCard.followUpDate {
+                followUpTasks = [FollowUpTask(dueDate: legacyDate)]
+            }
             let card = BusinessCard(
                 name: backupCard.name,
                 jobTitle: backupCard.jobTitle,
@@ -166,20 +182,18 @@ enum BackupService {
                 additionalBackImagePaths: backupCard.additionalBackImagePaths,
                 isMyCard: backupCard.isMyCard,
                 isFavorite: backupCard.isFavorite,
-                followUpDate: backupCard.followUpDate,
+                followUpTasks: followUpTasks,
                 interactions: backupCard.interactions
             )
             card.dateAdded = backupCard.dateAdded
             card.dateModified = backupCard.dateModified
             card.tags = backupCard.tagNames.compactMap { tagLookup[$0] }
             modelContext.insert(card)
-            // Re-importing a backup that carried a pending 追蹤提醒 needs to also re-schedule
-            // the actual local notification — BusinessCard.followUpDate being set is not by
-            // itself enough, since the notification is a separate OS-level object keyed by
-            // card id that importing straight into the model context bypasses entirely.
-            if let followUpDate = card.followUpDate {
-                ReminderService.schedule(cardID: card.id, name: card.name, date: followUpDate)
-            }
+            // Re-importing a backup that carried pending 追蹤提醒 needs to also re-schedule the
+            // actual local notifications — `BusinessCard.followUpTasks` being set is not by
+            // itself enough, since each notification is a separate OS-level object keyed by
+            // card id + task id that importing straight into the model context bypasses entirely.
+            ReminderService.syncAll(cardID: card.id, name: card.name, tasks: card.followUpTasks)
         }
 
         // A re-imported backup could carry a card flagged "我的名片" on top of one already

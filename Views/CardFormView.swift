@@ -54,12 +54,15 @@ struct CardFormView: View {
     @State private var rawOCRText = ""
 
     @State private var isFavorite = false
-    /// Whether the 追蹤提醒 toggle is on — kept separate from `followUpDate` so the DatePicker
-    /// has a concrete non-optional `Date` to bind to while still letting the field as a whole
-    /// be "unset" (this toggle off → `followUpDate` saved as nil, cancelling any reminder).
-    @State private var hasFollowUp = false
-    @State private var followUpDate = Date.now.addingTimeInterval(3 * 24 * 3600)
-    /// Set to true if the user turned 追蹤提醒 on but denied (or previously denied) the
+    /// This form's working copy of the card's follow-up tasks — a plain array, not bound
+    /// directly to `card.followUpTasks`, so edits made here are still discardable by tapping
+    /// 取消 without ReminderService ever having synced anything to the OS in the meantime.
+    @State private var followUpTasks: [FollowUpTask] = []
+    /// The date/note fields for the "新增追蹤提醒" row below the task list — reset after each
+    /// add; separate from the tasks already sitting in `followUpTasks` above.
+    @State private var newTaskDate = Date.now.addingTimeInterval(3 * 24 * 3600)
+    @State private var newTaskNote = ""
+    /// Set to true if the user added a follow-up task but denied (or previously denied) the
     /// notification permission — shown as an inline hint rather than silently saving a
     /// reminder date that will never actually notify anyone.
     @State private var notificationsDenied = false
@@ -180,23 +183,38 @@ struct CardFormView: View {
                 }
 
                 Section {
-                    Toggle("設定追蹤提醒", isOn: $hasFollowUp)
-                    if hasFollowUp {
-                        DatePicker("提醒時間", selection: $followUpDate)
-                        if notificationsDenied {
-                            Label("尚未允許通知,提醒時間到了不會跳出通知。可以到「設定」App 開啟本 App 的通知權限。", systemImage: "bell.slash")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
+                    ForEach($followUpTasks) { $task in
+                        Toggle(isOn: $task.isCompleted) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(task.dueDate.formatted(date: .abbreviated, time: .shortened))
+                                    .strikethrough(task.isCompleted)
+                                if !task.note.isEmpty {
+                                    Text(task.note)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .strikethrough(task.isCompleted)
+                                }
+                            }
                         }
                     }
-                } footer: {
-                    Text("時間到了會用手機的本機通知提醒你,不需要網路,也不會有任何資料傳出這支手機。")
-                }
-                .onChange(of: hasFollowUp) { _, newValue in
-                    guard newValue else { return }
-                    ReminderService.requestAuthorizationIfNeeded { granted in
-                        notificationsDenied = !granted
+                    .onDelete { followUpTasks.remove(atOffsets: $0) }
+
+                    DatePicker("新提醒時間", selection: $newTaskDate)
+                    TextField("備註(選填,例如「寄簡報」)", text: $newTaskNote)
+                    Button {
+                        addFollowUpTask()
+                    } label: {
+                        Label("新增追蹤提醒", systemImage: "plus.circle")
                     }
+                    if notificationsDenied {
+                        Label("尚未允許通知,提醒時間到了不會跳出通知。可以到「設定」App 開啟本 App 的通知權限。", systemImage: "bell.slash")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("追蹤提醒")
+                } footer: {
+                    Text("時間到了會用手機的本機通知提醒你,不需要網路,也不會有任何資料傳出這支手機。一張名片可以設定多筆提醒,勾選代表已完成。")
                 }
             }
 
@@ -370,6 +388,15 @@ struct CardFormView: View {
         newInteractionText = ""
     }
 
+    private func addFollowUpTask() {
+        let note = newTaskNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        followUpTasks.append(FollowUpTask(dueDate: newTaskDate, note: note))
+        newTaskNote = ""
+        ReminderService.requestAuthorizationIfNeeded { granted in
+            notificationsDenied = !granted
+        }
+    }
+
     private func addNewTag() {
         let trimmed = newTagName.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
@@ -401,10 +428,7 @@ struct CardFormView: View {
             isMyCard = card.isMyCard
             isFavorite = card.isFavorite
             interactions = card.interactions
-            if let existingFollowUp = card.followUpDate {
-                hasFollowUp = true
-                followUpDate = existingFollowUp
-            }
+            followUpTasks = card.followUpTasks
         } else if let parsed = prefilled {
             name = parsed.name
             jobTitle = parsed.jobTitle
@@ -511,6 +535,13 @@ struct CardFormView: View {
         // is correct here, unlike `updateExisting` below.
         targetCard.interactions = interactions
         applyExtras(to: targetCard)
+        if isMyCard {
+            ReminderService.cancelAll(cardID: targetCard.id, taskIDs: targetCard.followUpTasks.map(\.id))
+            targetCard.followUpTasks = []
+        } else {
+            targetCard.followUpTasks = followUpTasks
+            ReminderService.syncAll(cardID: targetCard.id, name: targetCard.name, tasks: followUpTasks)
+        }
         enforceSingleMyCard(keeping: targetCard)
         finish(with: targetCard)
     }
@@ -523,20 +554,10 @@ struct CardFormView: View {
     /// was loaded from. "我的名片" never carries any of these (following up with yourself makes
     /// no sense), so they're forced off for it regardless of whatever the hidden form state holds.
     private func applyExtras(to card: BusinessCard) {
-        if isMyCard {
-            card.isFavorite = false
-            card.followUpDate = nil
-            ReminderService.cancel(cardID: card.id)
-            return
-        }
-        card.isFavorite = isFavorite
-        if hasFollowUp {
-            card.followUpDate = followUpDate
-            ReminderService.schedule(cardID: card.id, name: card.name, date: followUpDate)
-        } else {
-            card.followUpDate = nil
-            ReminderService.cancel(cardID: card.id)
-        }
+        // 追蹤提醒改成多筆 Task 清單後,「我的名片」跟一般名片的處理方式差異夠大(整組清空 vs.
+        // 整組同步),直接寫在 save()/updateExisting() 各自的呼叫點更清楚——這裡只剩最愛這一個
+        // 兩邊都適用的共用邏輯。
+        card.isFavorite = isMyCard ? false : isFavorite
     }
 
     /// Applies the entered fields onto an EXISTING card (the duplicate the user chose to
@@ -586,6 +607,16 @@ struct CardFormView: View {
         // overwritten.
         card.interactions += interactions
         applyExtras(to: card)
+        if isMyCard {
+            ReminderService.cancelAll(cardID: card.id, taskIDs: card.followUpTasks.map(\.id))
+            card.followUpTasks = []
+        } else if !followUpTasks.isEmpty {
+            // Union, not overwrite — same MECE philosophy as everything else in this function.
+            // The old card being merged into may already carry its own pending follow-ups; this
+            // pass's newly-entered tasks are added alongside them, never replacing them.
+            card.followUpTasks += followUpTasks
+            ReminderService.syncAll(cardID: card.id, name: card.name, tasks: card.followUpTasks)
+        }
         enforceSingleMyCard(keeping: card)
         // Not `finish(with: card)` directly — see `mergeSummary` above. The alert's "好"
         // button is what actually calls `finish(with:)` once the user has seen the result.
@@ -607,6 +638,10 @@ struct CardFormView: View {
         let olderPhotoCount = card.additionalFrontImagePaths.count + card.additionalBackImagePaths.count
         if olderPhotoCount > 0 {
             lines.append("更早的照片:\(olderPhotoCount) 張(在名片詳細頁可以看)")
+        }
+        let pendingTaskCount = card.followUpTasks.filter { !$0.isCompleted }.count
+        if pendingTaskCount > 0 {
+            lines.append("待追蹤提醒:\(pendingTaskCount) 筆")
         }
         return lines.joined(separator: "\n")
     }

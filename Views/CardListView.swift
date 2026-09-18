@@ -39,6 +39,10 @@ struct CardListView: View {
     @State private var selectedTags: Set<Tag> = []
     @State private var favoritesOnly = false
     @AppStorage("cardSortOption") private var sortOption: CardSortOption = .name
+    /// 標籤篩選邏輯:false = 符合任一標籤即可(OR,原本的行為);true = 要同時符合所有已選標籤
+    /// (AND)。存進 @AppStorage 是刻意的——這是使用習慣,不是單一畫面的暫時狀態,重開 App 應該
+    /// 記得使用者上次的選擇。
+    @AppStorage("tagFilterMatchAll") private var matchAllTags = false
 
     @State private var showingManualForm = false
     @State private var showingScan = false
@@ -47,6 +51,7 @@ struct CardListView: View {
     @State private var showingQRScan = false
     @State private var showingTagManager = false
     @State private var showingImporter = false
+    @State private var showingVCardImporter = false
     @State private var showingMyCard = false
     @State private var showingTrash = false
     @State private var showingStats = false
@@ -54,6 +59,14 @@ struct CardListView: View {
     @State private var exportFile: ExportFile?
     @State private var importResultMessage = ""
     @State private var showingImportResult = false
+    /// `.sheet(item:)` wrapper for the vCard import flow — same reasoning as
+    /// `CardDetailView.photoViewerRequest`: carrying the picked file as one Identifiable value
+    /// avoids a separate Bool flag ever getting out of sync with a lazily-set URL.
+    private struct VCardImportTarget: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
+    @State private var vCardImportTarget: VCardImportTarget?
 
     private var filteredCards: [BusinessCard] {
         // `localizedStandardContains` is Apple's "search-as-you-type" comparison — it's built
@@ -69,7 +82,16 @@ struct CardListView: View {
         let keywords = queryText.split(separator: " ", omittingEmptySubsequences: true)
             .map { Self.searchNormalized(String($0)) }
         let matched = allCards.filter { card in
-            let matchesTags = selectedTags.isEmpty || !Set(card.tags).isDisjoint(with: selectedTags)
+            let matchesTags: Bool
+            if selectedTags.isEmpty {
+                matchesTags = true
+            } else if matchAllTags {
+                // 符合全部:已選的標籤要整組都是這張名片標籤的子集合。
+                matchesTags = selectedTags.isSubset(of: Set(card.tags))
+            } else {
+                // 符合任一(原本的行為):只要有一個標籤對得上就算。
+                matchesTags = !Set(card.tags).isDisjoint(with: selectedTags)
+            }
             guard matchesTags else { return false }
             guard !favoritesOnly || card.isFavorite else { return false }
             guard !keywords.isEmpty else { return true }
@@ -142,6 +164,7 @@ struct CardListView: View {
                 filterBar
                 content
             }
+            .background(Theme.listBackground)
             .navigationTitle("AcardKing")
             .navigationDestination(for: BusinessCard.self) { card in
                 CardDetailView(card: card)
@@ -183,6 +206,14 @@ struct CardListView: View {
             .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.json]) { result in
                 handleImportResult(result)
             }
+            .fileImporter(isPresented: $showingVCardImporter, allowedContentTypes: [.vCard]) { result in
+                if case .success(let url) = result {
+                    vCardImportTarget = VCardImportTarget(url: url)
+                }
+            }
+            .sheet(item: $vCardImportTarget) { target in
+                VCardImportView(url: target.url)
+            }
             .alert(importResultMessage, isPresented: $showingImportResult) {
                 Button("好") {}
             }
@@ -199,9 +230,22 @@ struct CardListView: View {
             } label: {
                 Label("只看最愛", systemImage: favoritesOnly ? "star.fill" : "star")
                     .font(.footnote)
-                    .foregroundStyle(favoritesOnly ? .yellow : .secondary)
+                    .foregroundStyle(favoritesOnly ? Theme.gold : .secondary)
             }
             .buttonStyle(.plain)
+
+            // 只有選了兩個以上標籤時「符合任一/符合全部」才有意義區分(只選一個標籤時兩種邏輯
+            // 結果一樣),所以只在那種情況才顯示這個切換,平常不佔畫面。
+            if selectedTags.count > 1 {
+                Button {
+                    matchAllTags.toggle()
+                } label: {
+                    Label(matchAllTags ? "符合全部" : "符合任一", systemImage: matchAllTags ? "checkmark.circle.fill" : "checkmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
 
             Spacer()
 
@@ -231,10 +275,14 @@ struct CardListView: View {
                     NavigationLink(value: card) {
                         CardRow(card: card)
                     }
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 }
                 .onDelete(perform: deleteCards)
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -281,6 +329,12 @@ struct CardListView: View {
                     showingManualForm = true
                 } label: {
                     Label("手動輸入", systemImage: "square.and.pencil")
+                }
+                Divider()
+                Button {
+                    showingVCardImporter = true
+                } label: {
+                    Label("從檔案匯入名片(.vcf)", systemImage: "doc.badge.plus")
                 }
             } label: {
                 Image(systemName: "plus")
@@ -346,7 +400,7 @@ struct CardListView: View {
             let card = filteredCards[index]
             card.isDeleted = true
             card.deletedAt = .now
-            ReminderService.cancel(cardID: card.id)
+            ReminderService.cancelAll(cardID: card.id, taskIDs: card.followUpTasks.map(\.id))
         }
     }
 

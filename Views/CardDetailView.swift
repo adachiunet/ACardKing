@@ -25,14 +25,15 @@ struct CardDetailView: View {
             headerSection
 
             if !card.isMyCard {
-                Section {
-                    if let followUpDate = card.followUpDate {
-                        LabeledContent("追蹤提醒", value: followUpDate.formatted(date: .abbreviated, time: .shortened))
-                        Button("取消提醒", role: .destructive) { cancelFollowUp() }
-                    } else {
+                Section("追蹤提醒") {
+                    if card.followUpTasks.isEmpty {
                         Text("還沒設定追蹤提醒,可以到「編輯」裡設定。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(card.followUpTasks.sorted(by: { $0.dueDate < $1.dueDate })) { task in
+                            followUpRow(task)
+                        }
                     }
                 }
             }
@@ -158,7 +159,7 @@ struct CardDetailView: View {
                         card.isFavorite.toggle()
                     } label: {
                         Image(systemName: card.isFavorite ? "star.fill" : "star")
-                            .foregroundStyle(card.isFavorite ? .yellow : .primary)
+                            .foregroundStyle(card.isFavorite ? Theme.gold : .primary)
                     }
                 }
             }
@@ -248,13 +249,45 @@ struct CardDetailView: View {
     private func deleteCard() {
         card.isDeleted = true
         card.deletedAt = .now
-        ReminderService.cancel(cardID: card.id)
+        ReminderService.cancelAll(cardID: card.id, taskIDs: card.followUpTasks.map(\.id))
         dismiss()
     }
 
-    private func cancelFollowUp() {
-        card.followUpDate = nil
-        ReminderService.cancel(cardID: card.id)
+    @ViewBuilder
+    private func followUpRow(_ task: FollowUpTask) -> some View {
+        HStack {
+            Button {
+                toggleTaskCompletion(task)
+            } label: {
+                Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(task.isCompleted ? Theme.gold : .secondary)
+            }
+            .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(task.dueDate.formatted(date: .abbreviated, time: .shortened))
+                    .strikethrough(task.isCompleted)
+                if !task.note.isEmpty {
+                    Text(task.note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .strikethrough(task.isCompleted)
+                }
+            }
+        }
+        .swipeActions {
+            Button("刪除", role: .destructive) { deleteFollowUpTask(task) }
+        }
+    }
+
+    private func toggleTaskCompletion(_ task: FollowUpTask) {
+        guard let index = card.followUpTasks.firstIndex(where: { $0.id == task.id }) else { return }
+        card.followUpTasks[index].isCompleted.toggle()
+        ReminderService.syncAll(cardID: card.id, name: card.name, tasks: card.followUpTasks)
+    }
+
+    private func deleteFollowUpTask(_ task: FollowUpTask) {
+        card.followUpTasks.removeAll { $0.id == task.id }
+        ReminderService.cancel(cardID: card.id, taskID: task.id)
     }
 
     private func addInteraction() {

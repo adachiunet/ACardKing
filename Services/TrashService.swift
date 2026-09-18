@@ -45,7 +45,7 @@ enum TrashService {
         ImageStorageService.delete(card.backImagePath)
         for path in card.additionalFrontImagePaths { ImageStorageService.delete(path) }
         for path in card.additionalBackImagePaths { ImageStorageService.delete(path) }
-        ReminderService.cancel(cardID: card.id)
+        ReminderService.cancelAll(cardID: card.id, taskIDs: card.followUpTasks.map(\.id))
         context.delete(card)
     }
 
